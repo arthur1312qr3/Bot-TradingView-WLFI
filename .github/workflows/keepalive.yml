@@ -1,0 +1,32 @@
+name: Keep Bot Alive 24/7
+
+on:
+  schedule:
+    - cron: '*/14 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Ping Bot Health Endpoint
+        run: |
+          echo "🔄 Fazendo ping no bot..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://SEU-BOT-AQUI.onrender.com/health)
+          
+          if [ $response -eq 200 ]; then
+            echo "✅ Bot está acordado! Status: $response"
+          else
+            echo "⚠️ Bot retornou status: $response"
+          fi
+          
+          sleep 30
+          
+          response2=$(curl -s -o /dev/null -w "%{http_code}" https://SEU-BOT-AQUI.onrender.com/)
+          echo "✅ Segundo ping completado. Status: $response2"
+      
+      - name: Log Timestamp
+        run: |
+          echo "⏰ Ping executado em: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "💓 Próximo ping em 14 minutos"
