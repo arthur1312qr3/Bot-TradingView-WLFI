@@ -13,7 +13,7 @@ jobs:
       - name: Ping Bot Health Endpoint
         run: |
           echo "🔄 Fazendo ping no bot..."
-          response=$(curl -s -o /dev/null -w "%{http_code}" https://SEU-BOT-AQUI.onrender.com/health)
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://bot-tradingview-wlfi.onrender.com/health)
           
           if [ $response -eq 200 ]; then
             echo "✅ Bot está acordado! Status: $response"
@@ -23,7 +23,7 @@ jobs:
           
           sleep 30
           
-          response2=$(curl -s -o /dev/null -w "%{http_code}" https://SEU-BOT-AQUI.onrender.com/)
+          response2=$(curl -s -o /dev/null -w "%{http_code}" https://bot-tradingview-wlfi.onrender.com/)
           echo "✅ Segundo ping completado. Status: $response2"
       
       - name: Log Timestamp
