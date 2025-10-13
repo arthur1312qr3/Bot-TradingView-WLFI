@@ -10,23 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Ping Bot Health Endpoint
+      - name: Ping Bot
         run: |
-          echo "🔄 Fazendo ping no bot..."
-          response=$(curl -s -o /dev/null -w "%{http_code}" https://bot-tradingview-wlfi.onrender.com/health)
-          
-          if [ $response -eq 200 ]; then
-            echo "✅ Bot está acordado! Status: $response"
-          else
-            echo "⚠️ Bot retornou status: $response"
-          fi
-          
+          curl -s https://bot-tradingview-wlfi.onrender.com/health
           sleep 30
-          
-          response2=$(curl -s -o /dev/null -w "%{http_code}" https://bot-tradingview-wlfi.onrender.com/)
-          echo "✅ Segundo ping completado. Status: $response2"
+          curl -s https://bot-tradingview-wlfi.onrender.com/
       
-      - name: Log Timestamp
+      - name: Log
         run: |
-          echo "⏰ Ping executado em: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          echo "💓 Próximo ping em 14 minutos"
+          echo "✅ Ping executado em $(date)"
