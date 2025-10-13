@@ -4,6 +4,7 @@ import hmac
 import base64
 import hashlib
 import time
+import re
 from datetime import datetime
 from flask import Flask, request, jsonify
 import requests
@@ -18,7 +19,7 @@ BASE_URL = 'https://api.bitget.com'
 
 # Configurações do bot
 LEVERAGE = 2
-TARGET_SYMBOL = 'WLFIUSDT'  # Par fixo: WLFI/USDT Futures
+TARGET_SYMBOL = 'WLFIUSDT'
 
 def log(message):
     """Log com timestamp"""
@@ -27,9 +28,9 @@ def log(message):
 
 def generate_signature(timestamp, method, request_path, body=''):
     """Gera assinatura para autenticação na Bitget"""
-    if body:
+    if body and isinstance(body, dict):
         body = json.dumps(body)
-    message = str(timestamp) + method.upper() + request_path + body
+    message = str(timestamp) + method.upper() + request_path + (body if body else '')
     mac = hmac.new(
         bytes(API_SECRET, encoding='utf8'),
         bytes(message, encoding='utf-8'),
@@ -42,7 +43,6 @@ def bitget_request(method, endpoint, params=None):
     timestamp = str(int(time.time() * 1000))
     request_path = endpoint
     
-    # Gera corpo da requisição para assinatura
     body_str = ''
     if params and method == 'POST':
         body_str = json.dumps(params)
@@ -66,14 +66,13 @@ def bitget_request(method, endpoint, params=None):
         
         response.raise_for_status()
         result = response.json()
-        log(f"API Response: {json.dumps(result)}")
         return result
     except requests.exceptions.Timeout:
         log(f"❌ Timeout na requisição para {endpoint}")
         return None
     except requests.exceptions.RequestException as e:
         log(f"❌ Erro na requisição Bitget: {e}")
-        if hasattr(e.response, 'text'):
+        if hasattr(e, 'response') and e.response is not None:
             log(f"Response: {e.response.text}")
         return None
     except Exception as e:
@@ -129,7 +128,6 @@ def get_account_balance():
     if result and result.get('code') == '00000':
         data = result.get('data', [])
         
-        # Procura saldo USDT
         for account in data:
             if account.get('marginCoin') == 'USDT':
                 available = float(account.get('available', 0))
@@ -147,7 +145,6 @@ def calculate_quantity_from_balance(price, leverage):
         log("❌ Sem saldo disponível!")
         return 0
     
-    # Usa 100% do saldo com alavancagem
     total_value = balance * leverage
     quantity = total_value / price
     
@@ -183,7 +180,7 @@ def place_order(symbol, side, quantity):
         'marginMode': 'crossed',
         'marginCoin': 'USDT',
         'size': str(quantity),
-        'side': side,  # 'open_long' ou 'close_long'
+        'side': side,
         'orderType': 'market',
         'force': 'gtc'
     }
@@ -199,69 +196,102 @@ def place_order(symbol, side, quantity):
         log(f"❌ Erro ao executar ordem: {result}")
         return False
 
+def parse_tradingview_message(data):
+    """Interpreta mensagem do TradingView (aceita qualquer formato)"""
+    
+    # Se vier como string, tenta converter para dict
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except:
+            # Se não for JSON, tenta extrair informações do texto
+            log("⚠️ Mensagem não é JSON, tentando extrair informações...")
+            
+            # Procura por palavras-chave
+            text = data.lower()
+            
+            # Detecta ação
+            if 'buy' in text or 'compra' in text or 'long' in text:
+                action = 'buy'
+            elif 'sell' in text or 'venda' in text or 'short' in text or 'close' in text:
+                action = 'sell'
+            else:
+                action = None
+            
+            # Detecta posição
+            if 'long' in text and 'flat' not in text:
+                market_position = 'long'
+            elif 'flat' in text or 'close' in text:
+                market_position = 'flat'
+            else:
+                market_position = None
+            
+            return {
+                'action': action,
+                'marketPosition': market_position
+            }
+    
+    # Se já for dict, retorna como está
+    if isinstance(data, dict):
+        return data
+    
+    return {}
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Endpoint que recebe webhooks do TradingView"""
     try:
-        data = request.get_json()
-        log(f"📨 Webhook recebido: {json.dumps(data)}")
+        # Pega dados (aceita JSON ou texto)
+        if request.is_json:
+            data = request.get_json()
+        else:
+            data = request.data.decode('utf-8')
         
-        # Valida campos obrigatórios
-        required_fields = ['action', 'marketPosition']
-        if not all(field in data for field in required_fields):
-            log("❌ Campos obrigatórios ausentes no JSON")
-            return jsonify({'status': 'error', 'message': 'Campos obrigatórios ausentes'}), 400
+        log(f"📨 Webhook recebido: {data}")
         
-        action = data['action']
-        market_position = data['marketPosition']
+        # Interpreta mensagem
+        parsed = parse_tradingview_message(data)
         
-        # SEMPRE usa WLFIUSDT
+        action = parsed.get('action', '').lower()
+        market_position = parsed.get('marketPosition', '').lower()
+        
+        log(f"🎯 Interpretado: action={action}, marketPosition={market_position}")
+        
         symbol = TARGET_SYMBOL
         
-        log(f"🎯 Processando: {action} | Posição: {market_position} | {symbol}")
-        
-        # Verifica se é operação LONG válida
+        # COMPRAR (abrir LONG)
         if action == 'buy' and market_position == 'long':
             log("🟢 SINAL DE COMPRA: ABRIR LONG")
             
-            # Configura alavancagem 2x
             set_leverage(symbol, LEVERAGE)
             time.sleep(0.5)
             
-            # Obtém preço atual de mercado
             current_price = get_current_price(symbol)
             if not current_price:
-                log("❌ Não foi possível obter preço de mercado")
                 return jsonify({'status': 'error', 'message': 'Erro ao obter preço'}), 500
             
-            # Calcula quantidade usando 100% do saldo
             quantity = calculate_quantity_from_balance(current_price, LEVERAGE)
             
             if quantity <= 0:
-                log("❌ Quantidade inválida ou sem saldo")
-                return jsonify({'status': 'error', 'message': 'Sem saldo ou quantidade inválida'}), 500
+                return jsonify({'status': 'error', 'message': 'Sem saldo'}), 500
             
-            # Executa ordem MARKET (compra imediata)
             log(f"🚀 COMPRANDO A MERCADO: {quantity} WLFI")
             success = place_order(symbol, 'open_long', quantity)
             
             if success:
                 return jsonify({
                     'status': 'success',
-                    'action': 'LONG ABERTO A MERCADO',
-                    'symbol': 'WLFIUSDT',
+                    'action': 'LONG ABERTO',
                     'quantity': quantity,
-                    'price': current_price,
-                    'leverage': LEVERAGE,
-                    'order_type': 'MARKET'
+                    'price': current_price
                 }), 200
             else:
                 return jsonify({'status': 'error', 'message': 'Falha ao abrir LONG'}), 500
         
+        # VENDER (fechar LONG)
         elif action == 'sell' and market_position == 'flat':
             log("🔴 SINAL DE VENDA: FECHAR LONG")
             
-            # Obtém tamanho da posição atual
             position_size = get_current_position(symbol)
             
             if position_size > 0:
@@ -271,106 +301,87 @@ def webhook():
                 if success:
                     return jsonify({
                         'status': 'success',
-                        'action': 'LONG FECHADO A MERCADO',
-                        'symbol': 'WLFIUSDT',
-                        'quantity': position_size,
-                        'order_type': 'MARKET'
+                        'action': 'LONG FECHADO',
+                        'quantity': position_size
                     }), 200
                 else:
-                    return jsonify({'status': 'error', 'message': 'Falha ao fechar LONG'}), 500
+                    return jsonify({'status': 'error', 'message': 'Falha ao fechar'}), 500
             else:
-                log("⚠️ Sem posição LONG aberta para fechar")
-                return jsonify({'status': 'warning', 'message': 'Sem posição aberta'}), 200
+                log("⚠️ Sem posição para fechar")
+                return jsonify({'status': 'warning', 'message': 'Sem posição'}), 200
         
         else:
-            log(f"⏭️ Sinal ignorado: {action} com posição {market_position}")
-            return jsonify({'status': 'ignored', 'message': 'Não é operação LONG válida'}), 200
+            log(f"⏭️ Sinal ignorado: {action}/{market_position}")
+            return jsonify({'status': 'ignored', 'message': 'Sinal não reconhecido'}), 200
     
     except Exception as e:
-        log(f"❌ ERRO CRÍTICO: {str(e)}")
+        log(f"❌ ERRO: {str(e)}")
         import traceback
         log(traceback.format_exc())
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Endpoint de health check"""
+    """Health check"""
     return jsonify({
         'status': 'online',
         'timestamp': datetime.now().isoformat(),
-        'message': 'Bot TradingView → Bitget funcionando'
+        'message': 'Bot funcionando'
     }), 200
 
 @app.route('/', methods=['GET'])
 def home():
     """Página inicial"""
     return '''
-    <h1>🤖 TradingView to Bitget Bot - WLFI</h1>
+    <h1>🤖 Bot TradingView → Bitget WLFI</h1>
     <p>Status: <strong>Online ✅</strong></p>
-    <p>Webhook URL: <code>/webhook</code></p>
-    <p>Health Check: <code>/health</code></p>
+    <p>Webhook: <code>/webhook</code></p>
+    <p>Health: <code>/health</code></p>
     <hr>
     <p><strong>Configurações:</strong></p>
     <ul>
         <li>Par: <strong>WLFIUSDT</strong></li>
-        <li>Alavancagem: <strong>2x (fixo)</strong></li>
-        <li>Saldo usado: <strong>100% disponível</strong></li>
-        <li>Tipo de ordem: <strong>MARKET (imediata)</strong></li>
-        <li>Modo: <strong>LONG apenas</strong></li>
-    </ul>
-    <hr>
-    <p><strong>Como funciona:</strong></p>
-    <ul>
-        <li>✅ Recebe sinal "buy" do TradingView → <strong>COMPRA TUDO a mercado</strong></li>
-        <li>✅ Recebe sinal "sell" do TradingView → <strong>VENDE TUDO a mercado</strong></li>
-        <li>✅ Usa sempre 100% do saldo com 2x de alavancagem</li>
-        <li>✅ Execução instantânea (market order)</li>
+        <li>Alavancagem: <strong>2x</strong></li>
+        <li>Saldo: <strong>100%</strong></li>
+        <li>Tipo: <strong>MARKET</strong></li>
     </ul>
     ''', 200
 
 def keep_alive_worker():
-    """Worker thread que mantém o bot acordado fazendo auto-ping"""
+    """Mantém bot acordado"""
     import threading
-    import time
     
     def ping_self():
         while True:
             try:
-                time.sleep(840)  # 14 minutos (antes dos 15min de sleep)
+                time.sleep(840)
                 port = int(os.getenv('PORT', 5000))
                 url = f"http://localhost:{port}/health"
-                
-                # Tenta fazer ping local
                 try:
                     response = requests.get(url, timeout=5)
                     if response.status_code == 200:
-                        log("💓 Keep-alive: Bot mantido acordado")
+                        log("💓 Keep-alive OK")
                 except:
-                    # Se falhar localmente, não faz nada (normal no Render)
                     pass
             except Exception as e:
-                log(f"⚠️ Erro no keep-alive: {e}")
+                log(f"⚠️ Keep-alive error: {e}")
     
     thread = threading.Thread(target=ping_self, daemon=True)
     thread.start()
-    log("💓 Keep-alive thread iniciada (ping a cada 14min)")
+    log("💓 Keep-alive iniciado")
 
 if __name__ == '__main__':
-    log("🚀 Iniciando bot TradingView → Bitget WLFI")
+    log("🚀 Iniciando Bot WLFI")
     log(f"⚙️ Par: {TARGET_SYMBOL}")
-    log(f"⚙️ Alavancagem: {LEVERAGE}x FIXA")
-    log(f"⚙️ Saldo: USA 100% DISPONÍVEL")
-    log(f"⚙️ Tipo: MARKET ORDERS (imediatas)")
+    log(f"⚙️ Alavancagem: {LEVERAGE}x")
+    log(f"⚙️ Saldo: 100%")
+    log(f"⚙️ Tipo: MARKET")
     
-    # Valida credenciais
     if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
-        log("❌ ERRO: Credenciais da Bitget não configuradas!")
-        log("Configure as variáveis: BITGET_API_KEY, BITGET_API_SECRET, BITGET_API_PASSPHRASE")
+        log("❌ Credenciais não configuradas!")
         exit(1)
     
-    # Inicia keep-alive worker
     keep_alive_worker()
     
-    # Porta para Render.com
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
