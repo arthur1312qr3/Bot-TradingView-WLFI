@@ -17,4 +17,4 @@ jobs:
           curl -s https://bot-tradingview-wlfi.onrender.com/
       
       - name: Log
-        run: echo "✅ Ping em $(date)"
+        run: echo "✅ Ping $(date)"
