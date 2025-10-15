@@ -17,12 +17,12 @@ API_PASSPHRASE = os.getenv('BITGET_API_PASSPHRASE')
 BASE_URL = 'https://api.bitget.com'
 LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
-MAX_POSITIONS_PER_SIDE = 2  # Pyramiding = 2
+POSITION_SIZE_PERCENT = 0.25  # 25% do saldo por trade
 
 # Controle de posições
-positions_tracker = {
-    'long': {'count': 0, 'last_time': 0},
-    'short': {'count': 0, 'last_time': 0}
+position_tracker = {
+    'long': {'count': 0, 'sizes': []},
+    'short': {'count': 0, 'sizes': []}
 }
 tracker_lock = threading.Lock()
 
@@ -104,8 +104,8 @@ def get_positions(symbol):
     endpoint = f'/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT'
     result = bitget_request('GET', endpoint, None)
     
-    long_total = 0.0
-    short_total = 0.0
+    long_positions = []
+    short_positions = []
     
     if result and result.get('code') == '00000':
         for pos in result.get('data', []):
@@ -113,12 +113,15 @@ def get_positions(symbol):
                 total = float(pos.get('total', 0))
                 hold_side = pos.get('holdSide', '')
                 
-                if hold_side == 'long':
-                    long_total += abs(total)
-                elif hold_side == 'short':
-                    short_total += abs(total)
+                if hold_side == 'long' and total > 0:
+                    long_positions.append(abs(total))
+                elif hold_side == 'short' and total > 0:
+                    short_positions.append(abs(total))
     
-    return {'long': long_total, 'short': short_total}
+    return {
+        'long': {'count': len(long_positions), 'sizes': long_positions},
+        'short': {'count': len(short_positions), 'sizes': short_positions}
+    }
 
 def place_order(symbol, side, trade_side, quantity):
     endpoint = '/api/v2/mix/order/place-order'
@@ -138,32 +141,11 @@ def place_order(symbol, side, trade_side, quantity):
     
     if result and result.get('code') == '00000':
         order_id = result['data'].get('orderId', 'N/A')
-        log(f"✅ {side.upper()}-{trade_side.upper()} {quantity} | ID: {order_id}")
+        log(f"✅ {side.upper()} {trade_side.upper()} | {quantity} | ID: {order_id}")
         return True
     else:
         log(f"❌ Falhou: {result}")
         return False
-
-def can_add_position(side):
-    """Verifica se pode adicionar mais uma posição"""
-    with tracker_lock:
-        current_time = time.time()
-        
-        # Reset contador se passou mais de 30 segundos
-        if current_time - positions_tracker[side]['last_time'] > 30:
-            positions_tracker[side]['count'] = 0
-        
-        if positions_tracker[side]['count'] < MAX_POSITIONS_PER_SIDE:
-            positions_tracker[side]['count'] += 1
-            positions_tracker[side]['last_time'] = current_time
-            return True
-        
-        return False
-
-def reset_position_counter(side):
-    """Reseta contador quando fecha todas as posições"""
-    with tracker_lock:
-        positions_tracker[side]['count'] = 0
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -173,7 +155,7 @@ def webhook():
         action = data.get('action', '').lower()
         market_position = data.get('marketPosition', '').lower()
         
-        log(f"📨 {action.upper()}/{market_position.upper()}")
+        log(f"📨 {action.upper()} | {market_position}")
         
         symbol = TARGET_SYMBOL
         price = get_current_price(symbol)
@@ -183,104 +165,104 @@ def webhook():
         balance = get_account_balance()
         positions = get_positions(symbol)
         
-        log(f"💰 ${balance:.2f} | L:{positions['long']} S:{positions['short']}")
+        log(f"💰 ${balance:.2f} | L:{positions['long']['count']} S:{positions['short']['count']}")
         
+        # ======================
         # ABRIR LONG
+        # ======================
         if action == 'buy' and market_position == 'long':
-            log("🟢 LONG")
+            log("🟢 ABRIR LONG")
             
-            # Verifica se pode adicionar posição
-            if not can_add_position('long'):
-                log("⚠️ Máximo de LONGs atingido")
+            # Verifica se já tem 2 LONGs (limite pyramiding=2)
+            if positions['long']['count'] >= 2:
+                log("⚠️ Já tem 2 LONGs (limite)")
                 return jsonify({'status': 'ignored'}), 200
             
-            # Fecha SHORTs se tiver
-            if positions['short'] > 0:
-                log(f"🔄 Fechando SHORT: {positions['short']}")
-                place_order(symbol, 'buy', 'close', positions['short'])
-                reset_position_counter('short')
-                time.sleep(1)
-                balance = get_account_balance()
-            
+            # Configura alavancagem
             set_leverage(symbol, LEVERAGE, 'long')
-            time.sleep(0.5)
+            time.sleep(0.3)
             
+            # Calcula 25% do saldo com alavancagem 2x
             if balance <= 0:
-                return jsonify({'status': 'error'}), 500
+                return jsonify({'status': 'error', 'message': 'Sem saldo'}), 500
             
-            # Usa 50% do saldo disponível para esta posição
-            usable_balance = balance * 0.5
-            quantity = round((usable_balance * LEVERAGE) / price, 4)
+            amount_to_use = balance * POSITION_SIZE_PERCENT  # 25% do saldo
+            quantity = round((amount_to_use * LEVERAGE) / price, 4)
             
-            log(f"📊 Usando ${usable_balance:.2f} ({quantity} WLFI)")
+            log(f"📊 Usar: ${amount_to_use:.2f} (25%) | Comprar: {quantity} WLFI")
             
             success = place_order(symbol, 'buy', 'open', quantity)
             return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
         
+        # ======================
         # ABRIR SHORT
+        # ======================
         elif action == 'sell' and market_position == 'short':
-            log("🔴 SHORT")
+            log("🔴 ABRIR SHORT")
             
-            # Verifica se pode adicionar posição
-            if not can_add_position('short'):
-                log("⚠️ Máximo de SHORTs atingido")
+            # Verifica se já tem 2 SHORTs (limite pyramiding=2)
+            if positions['short']['count'] >= 2:
+                log("⚠️ Já tem 2 SHORTs (limite)")
                 return jsonify({'status': 'ignored'}), 200
             
-            # Fecha LONGs se tiver
-            if positions['long'] > 0:
-                log(f"🔄 Fechando LONG: {positions['long']}")
-                place_order(symbol, 'sell', 'close', positions['long'])
-                reset_position_counter('long')
-                time.sleep(1)
-                balance = get_account_balance()
-            
+            # Configura alavancagem
             set_leverage(symbol, LEVERAGE, 'short')
-            time.sleep(0.5)
+            time.sleep(0.3)
             
+            # Calcula 25% do saldo com alavancagem 2x
             if balance <= 0:
-                return jsonify({'status': 'error'}), 500
+                return jsonify({'status': 'error', 'message': 'Sem saldo'}), 500
             
-            # Usa 50% do saldo disponível para esta posição
-            usable_balance = balance * 0.5
-            quantity = round((usable_balance * LEVERAGE) / price, 4)
+            amount_to_use = balance * POSITION_SIZE_PERCENT  # 25% do saldo
+            quantity = round((amount_to_use * LEVERAGE) / price, 4)
             
-            log(f"📊 Usando ${usable_balance:.2f} ({quantity} WLFI)")
+            log(f"📊 Usar: ${amount_to_use:.2f} (25%) | Vender: {quantity} WLFI")
             
             success = place_order(symbol, 'sell', 'open', quantity)
             return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
         
-        # FECHAR LONG
+        # ======================
+        # FECHAR LONG (1 posição)
+        # ======================
         elif action == 'sell' and market_position == 'flat':
-            log("🔵 FECHAR LONG")
+            log("🔵 FECHAR 1 LONG")
             
-            if positions['long'] > 0:
-                success = place_order(symbol, 'sell', 'close', positions['long'])
-                if success:
-                    reset_position_counter('long')
+            if positions['long']['count'] > 0:
+                # Fecha a primeira (ou menor) posição LONG
+                quantity_to_close = positions['long']['sizes'][0]
+                log(f"📊 Fechar: {quantity_to_close} WLFI")
+                
+                success = place_order(symbol, 'sell', 'close', quantity_to_close)
                 return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
             else:
-                log("⚠️ Sem LONG")
+                log("⚠️ Sem LONG para fechar")
                 return jsonify({'status': 'warning'}), 200
         
-        # FECHAR SHORT
+        # ======================
+        # FECHAR SHORT (1 posição)
+        # ======================
         elif action == 'buy' and market_position == 'flat':
-            log("🔵 FECHAR SHORT")
+            log("🔵 FECHAR 1 SHORT")
             
-            if positions['short'] > 0:
-                success = place_order(symbol, 'buy', 'close', positions['short'])
-                if success:
-                    reset_position_counter('short')
+            if positions['short']['count'] > 0:
+                # Fecha a primeira (ou menor) posição SHORT
+                quantity_to_close = positions['short']['sizes'][0]
+                log(f"📊 Fechar: {quantity_to_close} WLFI")
+                
+                success = place_order(symbol, 'buy', 'close', quantity_to_close)
                 return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
             else:
-                log("⚠️ Sem SHORT")
+                log("⚠️ Sem SHORT para fechar")
                 return jsonify({'status': 'warning'}), 200
         
         else:
-            log(f"⏭️ Ignorado")
+            log(f"⏭️ Ignorado: {action}/{market_position}")
             return jsonify({'status': 'ignored'}), 200
     
     except Exception as e:
         log(f"❌ ERRO: {e}")
+        import traceback
+        log(traceback.format_exc())
         return jsonify({'status': 'error'}), 500
 
 @app.route('/health', methods=['GET'])
@@ -295,8 +277,9 @@ def home():
     <ul>
         <li>Par: WLFIUSDT</li>
         <li>Alavancagem: 2x</li>
-        <li>Pyramiding: 2 (máx 2 posições por lado)</li>
-        <li>Uso de saldo: 50% por posição</li>
+        <li>Pyramiding: 2 (máx 2 LONG + 2 SHORT)</li>
+        <li>Saldo por trade: 25%</li>
+        <li>Modo: LONG + SHORT</li>
     </ul>
     ''', 200
 
@@ -313,7 +296,7 @@ def keep_alive():
     threading.Thread(target=ping, daemon=True).start()
 
 if __name__ == '__main__':
-    log("🚀 Bot WLFI - Pyramiding 2")
+    log("🚀 Bot WLFI - Pyramiding 2 (25% por trade)")
     
     if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
         log("❌ Credenciais faltando!")
