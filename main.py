@@ -124,14 +124,25 @@ def get_positions(symbol):
     return {'long': long_pos, 'short': short_pos}
 
 def calculate_quantity(balance, price):
-    position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
+    """
+    Com alavancagem 2x configurada na exchange,
+    usar $2.73 gera exposição de $5.46
+    """
+    # Usa saldo disponível (alavancagem já configurada na exchange)
+    usable_balance = balance * POSITION_SIZE_PERCENT
     
-    if position_value < MIN_ORDER_VALUE:
-        log(f"ERRO: ${position_value:.2f} < $5")
+    # Verifica se tem mínimo (precisa $2.50 para gerar $5 com 2x)
+    min_balance_needed = MIN_ORDER_VALUE / LEVERAGE
+    
+    if usable_balance < min_balance_needed:
+        log(f"ERRO: Precisa min ${min_balance_needed:.2f} USDT")
         return 0
     
-    quantity = position_value / price
-    log(f"CALC: ${balance:.2f} * 2x = ${position_value:.2f} = {quantity:.4f}")
+    # Quantidade = saldo / preço (alavancagem aplicada pela exchange)
+    quantity = usable_balance / price
+    
+    log(f"CALC: ${usable_balance:.2f} / ${price:.4f} = {quantity:.4f} (com 2x = ${usable_balance*LEVERAGE:.2f})")
+    
     return round(quantity, 4)
 
 def close_position(symbol, side, quantity):
