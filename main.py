@@ -127,11 +127,11 @@ def calculate_quantity(balance, price):
     position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
     
     if position_value < MIN_ORDER_VALUE:
-        log(f"ERRO: ${position_value:.2f} < min $5")
+        log(f"ERRO: ${position_value:.2f} < $5")
         return 0
     
     quantity = position_value / price
-    log(f"CALC: ${balance:.2f} * 100% * 2x = ${position_value:.2f} = {quantity:.4f}")
+    log(f"CALC: ${balance:.2f} * 2x = ${position_value:.2f} = {quantity:.4f}")
     return round(quantity, 4)
 
 def close_position(symbol, side, quantity):
@@ -151,16 +151,12 @@ def close_position(symbol, side, quantity):
     result = bitget_request('POST', endpoint, params)
     
     if result and result.get('code') == '00000':
-        log(f"CLOSE {side.upper()} {quantity}")
+        log(f"CLOSE {side} {quantity}")
         return True
     return False
 
 def open_position(symbol, side, quantity):
     endpoint = '/api/v2/mix/order/place-order'
-    
-    # Determina tradeSide baseado no side
-    # buy = long, sell = short
-    trade_side = 'long' if side == 'buy' else 'short'
     
     params = {
         'symbol': symbol,
@@ -169,15 +165,13 @@ def open_position(symbol, side, quantity):
         'marginCoin': 'USDT',
         'size': str(quantity),
         'side': side,
-        'tradeSide': trade_side,  # ← ADICIONADO
         'orderType': 'market'
     }
     
     result = bitget_request('POST', endpoint, params)
     
     if result and result.get('code') == '00000':
-        order_id = result['data'].get('orderId', 'N/A')
-        log(f"OPEN {side.upper()} {quantity}")
+        log(f"OK {side} {quantity}")
         return True
     else:
         log(f"FAIL {result}")
@@ -210,7 +204,6 @@ def webhook():
         
         action = data.get('action', '').lower()
         market_position = data.get('marketPosition', '').lower()
-        prev_market_position = data.get('prevMarketPosition', '').lower()
         position_size = float(data.get('positionSize', 0))
         
         key = f"{action}_{market_position}_{position_size}"
@@ -229,32 +222,27 @@ def webhook():
         
         log(f"$ {balance:.2f} | P:{price:.4f}")
         
-        # FLAT
         if position_size == 0 and market_position == 'flat':
             log("CLOSE ALL")
-            
             if positions['long'] > 0:
                 close_position(symbol, 'sell', positions['long'])
             if positions['short'] > 0:
                 close_position(symbol, 'buy', positions['short'])
-            
             update_state('reset')
             return jsonify({'status': 'success'}), 200
         
-        # BUY
         if action == 'buy':
-            
             if positions['short'] > 0:
-                log("REV S->L")
+                log("CLOSE SHORT")
                 close_position(symbol, 'buy', positions['short'])
                 time.sleep(0.3)
                 balance = get_account_balance()
             
             if positions['long'] > 0:
-                log("JA TEM LONG")
+                log("SKIP")
                 return jsonify({'status': 'ignored'}), 200
             
-            log("OPEN LONG")
+            log("LONG")
             set_leverage(symbol, LEVERAGE, 'long')
             
             quantity = calculate_quantity(balance, price)
@@ -267,20 +255,18 @@ def webhook():
             
             return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
         
-        # SELL
         elif action == 'sell':
-            
             if positions['long'] > 0:
-                log("REV L->S")
+                log("CLOSE LONG")
                 close_position(symbol, 'sell', positions['long'])
                 time.sleep(0.3)
                 balance = get_account_balance()
             
             if positions['short'] > 0:
-                log("JA TEM SHORT")
+                log("SKIP")
                 return jsonify({'status': 'ignored'}), 200
             
-            log("OPEN SHORT")
+            log("SHORT")
             set_leverage(symbol, LEVERAGE, 'short')
             
             quantity = calculate_quantity(balance, price)
@@ -305,8 +291,7 @@ def health():
 
 @app.route('/', methods=['GET'])
 def home():
-    with state_lock:
-        return f'<h1>Bot WLFI</h1><p>Pyr:1 | 100% | 2x</p>', 200
+    return '<h1>Bot WLFI</h1><p>Pyr:1|100%|2x</p>', 200
 
 def keep_alive():
     def ping():
@@ -321,6 +306,5 @@ def keep_alive():
 if __name__ == '__main__':
     if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
         exit(1)
-    
     keep_alive()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
