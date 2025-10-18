@@ -319,14 +319,3 @@ if __name__ == '__main__':
         exit(1)
     keep_alive()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
-```
-
----
-
-## ✅ **AGORA SIM ESTÁ CORRETO!**
-
-**Com $2.73 de saldo:**
-```
-Cálculo: ($2.73 × 2) / $0.13 = 42 WLFI
-Exposição: $5.46
-Margem usada: $2.73
