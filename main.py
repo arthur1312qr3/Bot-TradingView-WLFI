@@ -18,7 +18,6 @@ BASE_URL = 'https://api.bitget.com'
 LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
 POSITION_SIZE_PERCENT = 1.0
-MAX_PYRAMIDING = 1
 MIN_ORDER_VALUE = 5.0
 
 position_state = {'long_entries': 0, 'short_entries': 0}
@@ -26,25 +25,18 @@ state_lock = threading.Lock()
 last_action = {'key': None, 'time': 0}
 
 def log(message):
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    print(f"[{timestamp}] {message}")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
 
 def generate_signature(timestamp, method, request_path, body=''):
     if body and isinstance(body, dict):
         body = json.dumps(body)
     message = str(timestamp) + method.upper() + request_path + (body if body else '')
-    mac = hmac.new(
-        bytes(API_SECRET, encoding='utf8'),
-        bytes(message, encoding='utf-8'),
-        digestmod=hashlib.sha256
-    )
+    mac = hmac.new(bytes(API_SECRET, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod=hashlib.sha256)
     return base64.b64encode(mac.digest()).decode()
 
 def bitget_request(method, endpoint, params=None):
     timestamp = str(int(time.time() * 1000))
-    body_str = ''
-    if params and method == 'POST':
-        body_str = json.dumps(params)
+    body_str = json.dumps(params) if params and method == 'POST' else ''
     
     headers = {
         'ACCESS-KEY': API_KEY,
@@ -55,48 +47,32 @@ def bitget_request(method, endpoint, params=None):
         'locale': 'en-US'
     }
     
-    url = BASE_URL + endpoint
-    
     try:
-        if method == 'GET':
-            response = requests.get(url, headers=headers, timeout=10)
-        elif method == 'POST':
-            response = requests.post(url, headers=headers, data=body_str if body_str else None, timeout=10)
-        
+        response = requests.post(BASE_URL + endpoint, headers=headers, data=body_str, timeout=8) if method == 'POST' else requests.get(BASE_URL + endpoint, headers=headers, timeout=8)
         response.raise_for_status()
         return response.json()
     except Exception as e:
         log(f"ERR {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                log(f"API {e.response.json()}")
-            except:
-                pass
         return None
 
 def set_leverage(symbol, leverage, hold_side):
-    endpoint = '/api/v2/mix/account/set-leverage'
-    params = {
-        'symbol': symbol,
-        'productType': 'USDT-FUTURES',
-        'marginCoin': 'USDT',
-        'leverage': str(leverage),
-        'holdSide': hold_side
-    }
-    return bitget_request('POST', endpoint, params)
+    return bitget_request('POST', '/api/v2/mix/account/set-leverage', {
+        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginCoin': 'USDT',
+        'leverage': str(leverage), 'holdSide': hold_side
+    })
 
 def get_account_balance():
-    endpoint = '/api/v2/mix/account/accounts?productType=USDT-FUTURES'
-    result = bitget_request('GET', endpoint, None)
+    result = bitget_request('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES', None)
     if result and result.get('code') == '00000':
         for account in result.get('data', []):
             if account.get('marginCoin') == 'USDT':
-                return float(account.get('available', 0))
+                # PEGA TODAS AS CASAS DECIMAIS (até 8)
+                balance = account.get('available', '0')
+                return float(balance) if isinstance(balance, (int, float)) else float(balance)
     return 0.0
 
 def get_current_price(symbol):
-    endpoint = f'/api/v2/mix/market/ticker?symbol={symbol}&productType=USDT-FUTURES'
-    result = bitget_request('GET', endpoint)
+    result = bitget_request('GET', f'/api/v2/mix/market/ticker?symbol={symbol}&productType=USDT-FUTURES')
     if result and result.get('code') == '00000':
         data = result.get('data', [])
         price = float(data[0].get('lastPr', 0)) if isinstance(data, list) else float(data.get('lastPr', 0))
@@ -104,93 +80,56 @@ def get_current_price(symbol):
     return None
 
 def get_positions(symbol):
-    endpoint = f'/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT'
-    result = bitget_request('GET', endpoint, None)
-    
-    long_pos = 0.0
-    short_pos = 0.0
-    
+    result = bitget_request('GET', f'/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT', None)
+    long_pos = short_pos = 0.0
     if result and result.get('code') == '00000':
         for pos in result.get('data', []):
             if pos.get('symbol') == symbol:
                 total = float(pos.get('total', 0))
                 hold_side = pos.get('holdSide', '')
-                
                 if hold_side == 'long' and total > 0:
                     long_pos = abs(total)
                 elif hold_side == 'short' and total > 0:
                     short_pos = abs(total)
-    
     return {'long': long_pos, 'short': short_pos}
 
 def calculate_quantity(balance, price):
-    """
-    Fórmula Bitget: size = (Capital × Alavancagem) / Preço
-    """
     capital = balance * POSITION_SIZE_PERCENT
-    
-    # Calcula exposição total
     exposure = capital * LEVERAGE
     
-    # Verifica mínimo
     if exposure < MIN_ORDER_VALUE:
-        log(f"ERRO: Exp ${exposure:.2f} < min $5")
+        log(f"ERR: ${exposure:.8f} < $5")
         return 0
     
-    # Calcula quantidade
     quantity = exposure / price
-    
-    log(f"CALC: (${capital:.2f} × {LEVERAGE}) / ${price:.4f} = {quantity:.4f}")
-    log(f"EXP: ${exposure:.2f}")
-    
+    log(f"BAL: ${balance:.8f} | EXP: ${exposure:.2f} | QTY: {quantity:.4f}")
     return round(quantity, 4)
 
 def close_position(symbol, side, quantity):
-    endpoint = '/api/v2/mix/order/place-order'
-    
-    params = {
-        'symbol': symbol,
-        'productType': 'USDT-FUTURES',
-        'marginMode': 'crossed',
-        'marginCoin': 'USDT',
-        'size': str(quantity),
-        'side': side,
-        'orderType': 'market',
-        'reduceOnly': 'YES'
-    }
-    
-    result = bitget_request('POST', endpoint, params)
-    
+    result = bitget_request('POST', '/api/v2/mix/order/place-order', {
+        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginMode': 'crossed',
+        'marginCoin': 'USDT', 'size': str(quantity), 'side': side,
+        'orderType': 'market', 'reduceOnly': 'YES'
+    })
     if result and result.get('code') == '00000':
-        log(f"CLOSE {side} {quantity}")
+        log(f"CLOSE {side}")
         return True
     return False
 
 def open_position(symbol, side, quantity):
-    endpoint = '/api/v2/mix/order/place-order'
-    
-    params = {
-        'symbol': symbol,
-        'productType': 'USDT-FUTURES',
-        'marginMode': 'crossed',
-        'marginCoin': 'USDT',
-        'size': str(quantity),
-        'side': side,
-        'orderType': 'market'
-    }
-    
-    result = bitget_request('POST', endpoint, params)
-    
+    result = bitget_request('POST', '/api/v2/mix/order/place-order', {
+        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginMode': 'crossed',
+        'marginCoin': 'USDT', 'size': str(quantity), 'side': side, 'orderType': 'market'
+    })
     if result and result.get('code') == '00000':
-        log(f"OK {side} {quantity}")
+        log(f"OK {side}")
         return True
-    else:
-        log(f"FAIL {result}")
-        return False
+    log(f"FAIL")
+    return False
 
 def is_duplicate(key):
     current_time = time.time()
-    if last_action['key'] == key and (current_time - last_action['time']) < 1:
+    if last_action['key'] == key and (current_time - last_action['time']) < 0.5:
         return True
     last_action['key'] = key
     last_action['time'] = current_time
@@ -212,97 +151,80 @@ def update_state(action):
 def webhook():
     try:
         data = request.get_json() if request.is_json else {}
-        
         action = data.get('action', '').lower()
         market_position = data.get('marketPosition', '').lower()
         position_size = float(data.get('positionSize', 0))
         
-        key = f"{action}_{market_position}_{position_size}"
-        if is_duplicate(key):
-            return jsonify({'status': 'ignored'}), 200
+        if is_duplicate(f"{action}_{market_position}_{position_size}"):
+            return jsonify({'s': 'dup'}), 200
         
-        log(f">> {action.upper()} | {market_position}")
+        log(f">> {action.upper()}")
         
-        symbol = TARGET_SYMBOL
-        price = get_current_price(symbol)
+        price = get_current_price(TARGET_SYMBOL)
         if not price:
-            return jsonify({'status': 'error'}), 500
+            return jsonify({'s': 'err'}), 500
         
         balance = get_account_balance()
-        positions = get_positions(symbol)
-        
-        log(f"$ {balance:.2f} | P:{price:.4f}")
+        positions = get_positions(TARGET_SYMBOL)
         
         if position_size == 0 and market_position == 'flat':
-            log("CLOSE ALL")
             if positions['long'] > 0:
-                close_position(symbol, 'sell', positions['long'])
+                close_position(TARGET_SYMBOL, 'sell', positions['long'])
             if positions['short'] > 0:
-                close_position(symbol, 'buy', positions['short'])
+                close_position(TARGET_SYMBOL, 'buy', positions['short'])
             update_state('reset')
-            return jsonify({'status': 'success'}), 200
+            return jsonify({'s': 'ok'}), 200
         
         if action == 'buy':
             if positions['short'] > 0:
-                log("CLOSE SHORT")
-                close_position(symbol, 'buy', positions['short'])
-                time.sleep(0.3)
+                close_position(TARGET_SYMBOL, 'buy', positions['short'])
                 balance = get_account_balance()
             
             if positions['long'] > 0:
-                log("SKIP")
-                return jsonify({'status': 'ignored'}), 200
+                return jsonify({'s': 'skip'}), 200
             
-            log("LONG")
-            set_leverage(symbol, LEVERAGE, 'long')
-            
+            set_leverage(TARGET_SYMBOL, LEVERAGE, 'long')
             quantity = calculate_quantity(balance, price)
-            if quantity <= 0:
-                return jsonify({'status': 'error'}), 500
             
-            success = open_position(symbol, 'buy', quantity)
+            if quantity <= 0:
+                return jsonify({'s': 'err'}), 500
+            
+            success = open_position(TARGET_SYMBOL, 'buy', quantity)
             if success:
                 update_state('add_long')
-            
-            return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
+            return jsonify({'s': 'ok' if success else 'err'}), 200 if success else 500
         
         elif action == 'sell':
             if positions['long'] > 0:
-                log("CLOSE LONG")
-                close_position(symbol, 'sell', positions['long'])
-                time.sleep(0.3)
+                close_position(TARGET_SYMBOL, 'sell', positions['long'])
                 balance = get_account_balance()
             
             if positions['short'] > 0:
-                log("SKIP")
-                return jsonify({'status': 'ignored'}), 200
+                return jsonify({'s': 'skip'}), 200
             
-            log("SHORT")
-            set_leverage(symbol, LEVERAGE, 'short')
-            
+            set_leverage(TARGET_SYMBOL, LEVERAGE, 'short')
             quantity = calculate_quantity(balance, price)
-            if quantity <= 0:
-                return jsonify({'status': 'error'}), 500
             
-            success = open_position(symbol, 'sell', quantity)
+            if quantity <= 0:
+                return jsonify({'s': 'err'}), 500
+            
+            success = open_position(TARGET_SYMBOL, 'sell', quantity)
             if success:
                 update_state('add_short')
-            
-            return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
+            return jsonify({'s': 'ok' if success else 'err'}), 200 if success else 500
         
-        return jsonify({'status': 'ignored'}), 200
-    
+        return jsonify({'s': 'ign'}), 200
     except Exception as e:
         log(f"ERR {e}")
-        return jsonify({'status': 'error'}), 500
+        return jsonify({'s': 'err'}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'online'}), 200
+    return jsonify({'s': 'ok'}), 200
 
 @app.route('/', methods=['GET'])
 def home():
-    return '<h1>Bot WLFI</h1><p>Pyr:1|100%|2x</p>', 200
+    return '<h1>WLFI Bot</h1>', 200
 
 def keep_alive():
     def ping():
