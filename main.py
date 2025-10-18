@@ -56,9 +56,9 @@ def bitget_request(method, endpoint, params=None):
         if hasattr(e, 'response') and e.response is not None:
             try:
                 error_json = e.response.json()
-                log(f"API ERROR: {error_json}")  # LOG DETALHADO
+                log(f"API: {error_json}")
             except:
-                log(f"API TEXT: {e.response.text}")
+                log(f"TXT: {e.response.text}")
         return None
 
 def set_leverage(symbol, leverage, hold_side):
@@ -121,7 +121,7 @@ def close_position(symbol, side, quantity):
         'orderType': 'market',
         'reduceOnly': 'YES'
     }
-    log(f"CLOSE PARAMS: {params}")  # LOG DOS PARÂMETROS
+    log(f"CLOSE: {params}")
     result = bitget_request('POST', '/api/v2/mix/order/place-order', params)
     
     if result and result.get('code') == '00000':
@@ -140,7 +140,7 @@ def open_position(symbol, side, quantity):
         'side': side,
         'orderType': 'market'
     }
-    log(f"OPEN PARAMS: {params}")  # LOG DOS PARÂMETROS
+    log(f"OPEN: {params}")
     result = bitget_request('POST', '/api/v2/mix/order/place-order', params)
     
     if result and result.get('code') == '00000':
@@ -265,4 +265,3 @@ if __name__ == '__main__':
         exit(1)
     keep_alive()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
-': '...'}
