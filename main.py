@@ -53,6 +53,12 @@ def bitget_request(method, endpoint, params=None):
         return response.json()
     except Exception as e:
         log(f"ERR {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_json = e.response.json()
+                log(f"API ERROR: {error_json}")  # LOG DETALHADO
+            except:
+                log(f"API TEXT: {e.response.text}")
         return None
 
 def set_leverage(symbol, leverage, hold_side):
@@ -66,9 +72,8 @@ def get_account_balance():
     if result and result.get('code') == '00000':
         for account in result.get('data', []):
             if account.get('marginCoin') == 'USDT':
-                # PEGA TODAS AS CASAS DECIMAIS (até 8)
                 balance = account.get('available', '0')
-                return float(balance) if isinstance(balance, (int, float)) else float(balance)
+                return float(balance)
     return 0.0
 
 def get_current_price(symbol):
@@ -98,7 +103,7 @@ def calculate_quantity(balance, price):
     exposure = capital * LEVERAGE
     
     if exposure < MIN_ORDER_VALUE:
-        log(f"ERR: ${exposure:.8f} < $5")
+        log(f"ERR: EXP ${exposure:.8f} < $5")
         return 0
     
     quantity = exposure / price
@@ -106,25 +111,42 @@ def calculate_quantity(balance, price):
     return round(quantity, 4)
 
 def close_position(symbol, side, quantity):
-    result = bitget_request('POST', '/api/v2/mix/order/place-order', {
-        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginMode': 'crossed',
-        'marginCoin': 'USDT', 'size': str(quantity), 'side': side,
-        'orderType': 'market', 'reduceOnly': 'YES'
-    })
+    params = {
+        'symbol': symbol,
+        'productType': 'USDT-FUTURES',
+        'marginMode': 'crossed',
+        'marginCoin': 'USDT',
+        'size': str(quantity),
+        'side': side,
+        'orderType': 'market',
+        'reduceOnly': 'YES'
+    }
+    log(f"CLOSE PARAMS: {params}")  # LOG DOS PARÂMETROS
+    result = bitget_request('POST', '/api/v2/mix/order/place-order', params)
+    
     if result and result.get('code') == '00000':
-        log(f"CLOSE {side}")
+        log(f"CLOSE OK")
         return True
+    log(f"CLOSE FAIL: {result}")
     return False
 
 def open_position(symbol, side, quantity):
-    result = bitget_request('POST', '/api/v2/mix/order/place-order', {
-        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginMode': 'crossed',
-        'marginCoin': 'USDT', 'size': str(quantity), 'side': side, 'orderType': 'market'
-    })
+    params = {
+        'symbol': symbol,
+        'productType': 'USDT-FUTURES',
+        'marginMode': 'crossed',
+        'marginCoin': 'USDT',
+        'size': str(quantity),
+        'side': side,
+        'orderType': 'market'
+    }
+    log(f"OPEN PARAMS: {params}")  # LOG DOS PARÂMETROS
+    result = bitget_request('POST', '/api/v2/mix/order/place-order', params)
+    
     if result and result.get('code') == '00000':
-        log(f"OK {side}")
+        log(f"OPEN OK")
         return True
-    log(f"FAIL")
+    log(f"OPEN FAIL: {result}")
     return False
 
 def is_duplicate(key):
@@ -215,7 +237,9 @@ def webhook():
         
         return jsonify({'s': 'ign'}), 200
     except Exception as e:
-        log(f"ERR {e}")
+        log(f"WEBHOOK ERR: {e}")
+        import traceback
+        log(traceback.format_exc())
         return jsonify({'s': 'err'}), 500
 
 @app.route('/health', methods=['GET'])
@@ -241,3 +265,4 @@ if __name__ == '__main__':
         exit(1)
     keep_alive()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
+': '...'}
