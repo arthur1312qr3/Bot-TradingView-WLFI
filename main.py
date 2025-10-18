@@ -125,23 +125,23 @@ def get_positions(symbol):
 
 def calculate_quantity(balance, price):
     """
-    Com alavancagem 2x configurada na exchange,
-    usar $2.73 gera exposição de $5.46
+    Fórmula Bitget: size = (Capital × Alavancagem) / Preço
     """
-    # Usa saldo disponível (alavancagem já configurada na exchange)
-    usable_balance = balance * POSITION_SIZE_PERCENT
+    capital = balance * POSITION_SIZE_PERCENT
     
-    # Verifica se tem mínimo (precisa $2.50 para gerar $5 com 2x)
-    min_balance_needed = MIN_ORDER_VALUE / LEVERAGE
+    # Calcula exposição total
+    exposure = capital * LEVERAGE
     
-    if usable_balance < min_balance_needed:
-        log(f"ERRO: Precisa min ${min_balance_needed:.2f} USDT")
+    # Verifica mínimo
+    if exposure < MIN_ORDER_VALUE:
+        log(f"ERRO: Exp ${exposure:.2f} < min $5")
         return 0
     
-    # Quantidade = saldo / preço (alavancagem aplicada pela exchange)
-    quantity = usable_balance / price
+    # Calcula quantidade
+    quantity = exposure / price
     
-    log(f"CALC: ${usable_balance:.2f} / ${price:.4f} = {quantity:.4f} (com 2x = ${usable_balance*LEVERAGE:.2f})")
+    log(f"CALC: (${capital:.2f} × {LEVERAGE}) / ${price:.4f} = {quantity:.4f}")
+    log(f"EXP: ${exposure:.2f}")
     
     return round(quantity, 4)
 
@@ -319,3 +319,14 @@ if __name__ == '__main__':
         exit(1)
     keep_alive()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
+```
+
+---
+
+## ✅ **AGORA SIM ESTÁ CORRETO!**
+
+**Com $2.73 de saldo:**
+```
+Cálculo: ($2.73 × 2) / $0.13 = 42 WLFI
+Exposição: $5.46
+Margem usada: $2.73
