@@ -17,8 +17,8 @@ API_PASSPHRASE = os.getenv('BITGET_API_PASSPHRASE')
 BASE_URL = 'https://api.bitget.com'
 LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
-POSITION_SIZE_PERCENT = 1.0  # 100% do saldo agora
-MAX_PYRAMIDING = 1  # ← TEMPORÁRIO ATÉ CONSEGUIR MAIS CAPITAL
+POSITION_SIZE_PERCENT = 1.0
+MAX_PYRAMIDING = 1
 MIN_ORDER_VALUE = 5.0
 
 position_state = {'long_entries': 0, 'short_entries': 0}
@@ -124,18 +124,14 @@ def get_positions(symbol):
     return {'long': long_pos, 'short': short_pos}
 
 def calculate_quantity(balance, price):
-    """Usa 100% do saldo com leverage 2x"""
-    
-    # Usa 100% do saldo com leverage
     position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
     
-    # Verifica mínimo
     if position_value < MIN_ORDER_VALUE:
-        log(f"ERRO: Valor ${position_value:.2f} < min $5. Precisa ${MIN_ORDER_VALUE/LEVERAGE:.2f} USDT")
+        log(f"ERRO: ${position_value:.2f} < min $5")
         return 0
     
     quantity = position_value / price
-    log(f"CALC: ${balance:.2f} * 100% * 2x = ${position_value:.2f} = {quantity:.4f} WLFI")
+    log(f"CALC: ${balance:.2f} * 100% * 2x = ${position_value:.2f} = {quantity:.4f}")
     return round(quantity, 4)
 
 def close_position(symbol, side, quantity):
@@ -162,6 +158,10 @@ def close_position(symbol, side, quantity):
 def open_position(symbol, side, quantity):
     endpoint = '/api/v2/mix/order/place-order'
     
+    # Determina tradeSide baseado no side
+    # buy = long, sell = short
+    trade_side = 'long' if side == 'buy' else 'short'
+    
     params = {
         'symbol': symbol,
         'productType': 'USDT-FUTURES',
@@ -169,6 +169,7 @@ def open_position(symbol, side, quantity):
         'marginCoin': 'USDT',
         'size': str(quantity),
         'side': side,
+        'tradeSide': trade_side,  # ← ADICIONADO
         'orderType': 'market'
     }
     
@@ -228,7 +229,7 @@ def webhook():
         
         log(f"$ {balance:.2f} | P:{price:.4f}")
         
-        # FLAT - FECHAR TUDO
+        # FLAT
         if position_size == 0 and market_position == 'flat':
             log("CLOSE ALL")
             
@@ -240,28 +241,25 @@ def webhook():
             update_state('reset')
             return jsonify({'status': 'success'}), 200
         
-        # BUY = LONG
+        # BUY
         if action == 'buy':
             
-            # Se tem SHORT, fecha e abre LONG (reversão)
             if positions['short'] > 0:
                 log("REV S->L")
                 close_position(symbol, 'buy', positions['short'])
                 time.sleep(0.3)
                 balance = get_account_balance()
             
-            # Se já tem LONG, ignora (pyramiding=1)
             if positions['long'] > 0:
                 log("JA TEM LONG")
                 return jsonify({'status': 'ignored'}), 200
             
-            # Abre LONG
             log("OPEN LONG")
             set_leverage(symbol, LEVERAGE, 'long')
             
             quantity = calculate_quantity(balance, price)
             if quantity <= 0:
-                return jsonify({'status': 'error', 'msg': 'saldo baixo'}), 500
+                return jsonify({'status': 'error'}), 500
             
             success = open_position(symbol, 'buy', quantity)
             if success:
@@ -269,28 +267,25 @@ def webhook():
             
             return jsonify({'status': 'success' if success else 'error'}), 200 if success else 500
         
-        # SELL = SHORT
+        # SELL
         elif action == 'sell':
             
-            # Se tem LONG, fecha e abre SHORT (reversão)
             if positions['long'] > 0:
                 log("REV L->S")
                 close_position(symbol, 'sell', positions['long'])
                 time.sleep(0.3)
                 balance = get_account_balance()
             
-            # Se já tem SHORT, ignora (pyramiding=1)
             if positions['short'] > 0:
                 log("JA TEM SHORT")
                 return jsonify({'status': 'ignored'}), 200
             
-            # Abre SHORT
             log("OPEN SHORT")
             set_leverage(symbol, LEVERAGE, 'short')
             
             quantity = calculate_quantity(balance, price)
             if quantity <= 0:
-                return jsonify({'status': 'error', 'msg': 'saldo baixo'}), 500
+                return jsonify({'status': 'error'}), 500
             
             success = open_position(symbol, 'sell', quantity)
             if success:
@@ -311,7 +306,7 @@ def health():
 @app.route('/', methods=['GET'])
 def home():
     with state_lock:
-        return f'<h1>Bot WLFI</h1><p>Pyr:1 (temp) | 100% | 2x</p>', 200
+        return f'<h1>Bot WLFI</h1><p>Pyr:1 | 100% | 2x</p>', 200
 
 def keep_alive():
     def ping():
