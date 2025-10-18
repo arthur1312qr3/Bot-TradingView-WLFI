@@ -17,7 +17,7 @@ API_PASSPHRASE = os.getenv('BITGET_API_PASSPHRASE')
 BASE_URL = 'https://api.bitget.com'
 LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
-POSITION_SIZE_PERCENT = 1.0
+POSITION_SIZE_PERCENT = 0.99
 MIN_ORDER_VALUE = 5.0
 
 position_state = {'long_entries': 0, 'short_entries': 0}
