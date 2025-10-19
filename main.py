@@ -18,10 +18,20 @@ API_PASSPHRASE = os.getenv('BITGET_API_PASSPHRASE')
 BASE_URL = 'https://api.bitget.com'
 LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
-POSITION_SIZE_PERCENT = 0.99  # 99% do saldo
+POSITION_SIZE_PERCENT = 0.99
 MIN_ORDER_VALUE = 5.0
+CACHE_TTL = 0.4  # Cache de 400ms
 
-executor = ThreadPoolExecutor(max_workers=3)
+# CACHE GLOBAL (OTIMIZAÇÃO #1)
+cache = {
+    'balance': 0,
+    'price': 0,
+    'positions': {'long': 0, 'short': 0},
+    'time': 0
+}
+cache_lock = threading.Lock()
+
+executor = ThreadPoolExecutor(max_workers=4)
 session = requests.Session()
 position_state = {'long_entries': 0, 'short_entries': 0}
 state_lock = threading.Lock()
@@ -52,25 +62,14 @@ def bitget_request(method, endpoint, params=None):
     
     try:
         if method == 'POST':
-            response = session.post(BASE_URL + endpoint, headers=headers, data=body_str, timeout=5)
+            response = session.post(BASE_URL + endpoint, headers=headers, data=body_str, timeout=2)
         else:
-            response = session.get(BASE_URL + endpoint, headers=headers, timeout=5)
+            response = session.get(BASE_URL + endpoint, headers=headers, timeout=2)
         response.raise_for_status()
         return response.json()
     except Exception as e:
         log(f"ERR {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                log(f"API: {e.response.json()}")
-            except:
-                pass
         return None
-
-def set_leverage_fast(symbol, hold_side):
-    executor.submit(bitget_request, 'POST', '/api/v2/mix/account/set-leverage', {
-        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginCoin': 'USDT',
-        'leverage': str(LEVERAGE), 'holdSide': hold_side
-    })
 
 def get_account_balance():
     result = bitget_request('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES', None)
@@ -102,6 +101,37 @@ def get_positions(symbol):
                     short_pos = abs(total)
     return {'long': long_pos, 'short': short_pos}
 
+def get_cached_data(force_refresh=False):
+    """OTIMIZAÇÃO #1: Cache de dados com TTL de 400ms"""
+    with cache_lock:
+        current_time = time.time()
+        
+        # Se cache é recente E não forçou refresh, retorna cache
+        if not force_refresh and (current_time - cache['time']) < CACHE_TTL:
+            log(f"CACHE HIT")
+            return cache['balance'], cache['price'], cache['positions']
+        
+        # Cache expirado ou forçou refresh - busca dados em paralelo
+        log(f"CACHE MISS - fetching...")
+        
+    # Busca em paralelo (fora do lock para não bloquear)
+    price_future = executor.submit(get_current_price, TARGET_SYMBOL)
+    balance_future = executor.submit(get_account_balance)
+    positions_future = executor.submit(get_positions, TARGET_SYMBOL)
+    
+    price = price_future.result()
+    balance = balance_future.result()
+    positions = positions_future.result()
+    
+    # Atualiza cache
+    with cache_lock:
+        cache['price'] = price
+        cache['balance'] = balance
+        cache['positions'] = positions
+        cache['time'] = current_time
+    
+    return balance, price, positions
+
 def calculate_quantity(balance, price):
     capital = balance * POSITION_SIZE_PERCENT
     exposure = capital * LEVERAGE
@@ -119,7 +149,12 @@ def close_position(symbol, side, quantity):
         'marginCoin': 'USDT', 'size': str(quantity), 'side': side,
         'orderType': 'market', 'reduceOnly': 'YES'
     })
-    return result and result.get('code') == '00000'
+    
+    if result and result.get('code') == '00000':
+        log(f"CLOSE OK")
+        return True
+    log(f"CLOSE FAIL")
+    return False
 
 def open_position(symbol, side, quantity):
     result = bitget_request('POST', '/api/v2/mix/order/place-order', {
@@ -128,14 +163,14 @@ def open_position(symbol, side, quantity):
     })
     
     if result and result.get('code') == '00000':
-        log(f"OK {side.upper()}")
+        log(f"OPEN {side.upper()} OK")
         return True
-    log(f"FAIL: {result}")
+    log(f"OPEN FAIL: {result}")
     return False
 
 def is_duplicate(key):
     current_time = time.time()
-    if last_action['key'] == key and (current_time - last_action['time']) < 0.3:
+    if last_action['key'] == key and (current_time - last_action['time']) < 0.2:
         return True
     last_action['key'] = key
     last_action['time'] = current_time
@@ -166,14 +201,8 @@ def webhook():
         
         log(f">> {action.upper()}")
         
-        # BUSCA DADOS EM PARALELO
-        price_future = executor.submit(get_current_price, TARGET_SYMBOL)
-        balance_future = executor.submit(get_account_balance)
-        positions_future = executor.submit(get_positions, TARGET_SYMBOL)
-        
-        price = price_future.result()
-        balance = balance_future.result()
-        positions = positions_future.result()
+        # OTIMIZAÇÃO #1: Usa cache em vez de 3 chamadas de API
+        balance, price, positions = get_cached_data()
         
         if not price:
             return jsonify({'s': 'err'}), 500
@@ -189,16 +218,16 @@ def webhook():
         
         # BUY
         if action == 'buy':
-            # Fecha SHORT se existir (paralelo com leverage)
             if positions['short'] > 0:
                 close_position(TARGET_SYMBOL, 'buy', positions['short'])
-                balance = get_account_balance()
+                # OTIMIZAÇÃO #3: NÃO busca saldo novo (usa o original)
+                # balance = get_account_balance()  <-- REMOVIDO
             
             if positions['long'] > 0:
                 return jsonify({'s': 'skip'}), 200
             
-            # Configura leverage em paralelo
-            set_leverage_fast(TARGET_SYMBOL, 'long')
+            # OTIMIZAÇÃO #2: REMOVIDO set_leverage_fast (configure manualmente na Bitget)
+            # set_leverage_fast(TARGET_SYMBOL, 'long')  <-- REMOVIDO
             
             quantity = calculate_quantity(balance, price)
             if quantity <= 0:
@@ -207,20 +236,23 @@ def webhook():
             success = open_position(TARGET_SYMBOL, 'buy', quantity)
             if success:
                 update_state('add_long')
+                # Força refresh do cache após abertura
+                get_cached_data(force_refresh=True)
+            
             return jsonify({'s': 'ok' if success else 'err'}), 200 if success else 500
         
         # SELL
         elif action == 'sell':
-            # Fecha LONG se existir
             if positions['long'] > 0:
                 close_position(TARGET_SYMBOL, 'sell', positions['long'])
-                balance = get_account_balance()
+                # OTIMIZAÇÃO #3: NÃO busca saldo novo (usa o original)
+                # balance = get_account_balance()  <-- REMOVIDO
             
             if positions['short'] > 0:
                 return jsonify({'s': 'skip'}), 200
             
-            # Configura leverage em paralelo
-            set_leverage_fast(TARGET_SYMBOL, 'short')
+            # OTIMIZAÇÃO #2: REMOVIDO set_leverage_fast
+            # set_leverage_fast(TARGET_SYMBOL, 'short')  <-- REMOVIDO
             
             quantity = calculate_quantity(balance, price)
             if quantity <= 0:
@@ -229,6 +261,9 @@ def webhook():
             success = open_position(TARGET_SYMBOL, 'sell', quantity)
             if success:
                 update_state('add_short')
+                # Força refresh do cache após abertura
+                get_cached_data(force_refresh=True)
+            
             return jsonify({'s': 'ok' if success else 'err'}), 200 if success else 500
         
         return jsonify({'s': 'ign'}), 200
@@ -242,7 +277,7 @@ def health():
 
 @app.route('/', methods=['GET'])
 def home():
-    return '<h1>WLFI</h1>', 200
+    return '<h1>WLFI Ultra</h1>', 200
 
 def keep_alive():
     def ping():
