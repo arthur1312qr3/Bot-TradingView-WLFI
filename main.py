@@ -248,14 +248,19 @@ def webhook():
         if not price:
             return jsonify({'s': 'err'}), 500
         
-        # FLAT
-        if position_size == 0 and market_position == 'flat':
-            if positions['long'] > 0:
-                close_position(TARGET_SYMBOL, 'sell', positions['long'])
-            if positions['short'] > 0:
-                close_position(TARGET_SYMBOL, 'buy', positions['short'])
-            update_state('reset')
-            return jsonify({'s': 'ok'}), 200
+        # FLAT - Apenas fecha se realmente tiver posições abertas
+        if position_size == 0:
+            if positions['long'] > 0 or positions['short'] > 0:
+                log("CLOSE ALL POSITIONS")
+                if positions['long'] > 0:
+                    close_position(TARGET_SYMBOL, 'sell', positions['long'])
+                if positions['short'] > 0:
+                    close_position(TARGET_SYMBOL, 'buy', positions['short'])
+                update_state('reset')
+                return jsonify({'s': 'ok'}), 200
+            else:
+                log("FLAT but no positions - checking action")
+                # Continua para processar ação de abertura
         
         # BUY
         if action == 'buy':
