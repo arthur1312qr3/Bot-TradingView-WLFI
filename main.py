@@ -9,6 +9,8 @@ from flask import Flask, request, jsonify
 import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 app = Flask(__name__)
 
@@ -20,7 +22,7 @@ LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
 POSITION_SIZE_PERCENT = 0.99
 MIN_ORDER_VALUE = 5.0
-CACHE_TTL = 0.4  # Cache de 400ms
+CACHE_TTL = 0.3  # Cache de 300ms (mais agressivo)
 
 # CACHE GLOBAL (OTIMIZAÇÃO #1)
 cache = {
@@ -32,7 +34,23 @@ cache = {
 cache_lock = threading.Lock()
 
 executor = ThreadPoolExecutor(max_workers=4)
+
+# OTIMIZAÇÃO DE RESILIÊNCIA: Session com retry automático
 session = requests.Session()
+retry_strategy = Retry(
+    total=3,  # Tenta no máximo 3 vezes
+    status_forcelist=[429, 500, 502, 503, 504],  # Retenta nestes códigos HTTP
+    backoff_factor=0.5,  # Espera 0.5s, 1s, 2s entre tentativas
+    allowed_methods=['GET', 'POST']  # Aplica para GET e POST
+)
+adapter = HTTPAdapter(
+    max_retries=retry_strategy,
+    pool_connections=10,
+    pool_maxsize=10
+)
+session.mount('https://', adapter)
+session.mount('http://', adapter)
+
 position_state = {'long_entries': 0, 'short_entries': 0}
 state_lock = threading.Lock()
 last_action = {'key': None, 'time': 0}
@@ -88,10 +106,21 @@ def get_current_price(symbol):
     return None
 
 def get_positions(symbol):
-    result = bitget_request('GET', f'/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT', None)
+    # OTIMIZAÇÃO: Tenta endpoint específico primeiro (mais rápido)
+    result = bitget_request('GET', f'/api/v2/mix/position/single-position?symbol={symbol}&productType=USDT-FUTURES&marginCoin=USDT', None)
+    
+    # Se endpoint específico não funcionar, usa o endpoint geral
+    if not result or result.get('code') != '00000':
+        result = bitget_request('GET', f'/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT', None)
+    
     long_pos = short_pos = 0.0
     if result and result.get('code') == '00000':
-        for pos in result.get('data', []):
+        positions_data = result.get('data', [])
+        # Se for resposta do single-position, data pode não ser lista
+        if not isinstance(positions_data, list):
+            positions_data = [positions_data]
+            
+        for pos in positions_data:
             if pos.get('symbol') == symbol:
                 total = float(pos.get('total', 0))
                 hold_side = pos.get('holdSide', '')
@@ -170,7 +199,7 @@ def open_position(symbol, side, quantity):
 
 def is_duplicate(key):
     current_time = time.time()
-    if last_action['key'] == key and (current_time - last_action['time']) < 0.2:
+    if last_action['key'] == key and (current_time - last_action['time']) < 0.15:
         return True
     last_action['key'] = key
     last_action['time'] = current_time
