@@ -65,7 +65,7 @@ def generate_signature(timestamp, method, request_path, body=''):
     mac = hmac.new(bytes(API_SECRET, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod=hashlib.sha256)
     return base64.b64encode(mac.digest()).decode()
 
-def bitget_request(method, endpoint, params=None):
+def bitget_request(method, endpoint, params=None, retry_count=0):
     timestamp = str(int(time.time() * 1000))
     body_str = json.dumps(params) if params and method == 'POST' else ''
     
@@ -84,7 +84,18 @@ def bitget_request(method, endpoint, params=None):
         else:
             response = session.get(BASE_URL + endpoint, headers=headers, timeout=2)
         response.raise_for_status()
+        
+        # Log de sucesso apenas se teve retry
+        if retry_count > 0:
+            log(f"OK after {retry_count} retries")
+        
         return response.json()
+    except requests.exceptions.ConnectionError as e:
+        log(f"CONN ERR (retry will handle)")
+        raise  # Deixa o retry do requests.Session lidar
+    except requests.exceptions.Timeout as e:
+        log(f"TIMEOUT (retry will handle)")
+        raise  # Deixa o retry do requests.Session lidar
     except Exception as e:
         log(f"ERR {e}")
         return None
@@ -224,11 +235,12 @@ def webhook():
         action = data.get('action', '').lower()
         market_position = data.get('marketPosition', '').lower()
         position_size = float(data.get('positionSize', 0))
+        timeframe = data.get('timeframe', 'unknown')
         
         if is_duplicate(f"{action}_{position_size}"):
             return jsonify({'s': 'dup'}), 200
         
-        log(f">> {action.upper()}")
+        log(f">> {action.upper()} [{timeframe}min] MP:{market_position} SIZE:{position_size}")
         
         # OTIMIZAÇÃO #1: Usa cache em vez de 3 chamadas de API
         balance, price, positions = get_cached_data()
