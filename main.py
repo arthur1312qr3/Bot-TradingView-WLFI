@@ -243,10 +243,19 @@ def webhook():
         log(f">> {action.upper()} [{timeframe}min] MP:{market_position} SIZE:{position_size}")
         
         # OTIMIZAÇÃO #1: Usa cache em vez de 3 chamadas de API
-        balance, price, positions = get_cached_data()
-        
-        if not price:
-            return jsonify({'s': 'err'}), 500
+        try:
+            balance, price, positions = get_cached_data()
+            
+            if not price:
+                log("ERR: Price is None")
+                return jsonify({'s': 'err', 'msg': 'no price'}), 500
+            
+            log(f"Data: BAL=${balance:.2f} PRICE=${price:.4f} L={positions['long']} S={positions['short']}")
+        except Exception as e:
+            log(f"ERR getting data: {e}")
+            import traceback
+            log(traceback.format_exc())
+            return jsonify({'s': 'err', 'msg': 'data fetch failed'}), 500
         
         # FLAT - Apenas fecha se realmente tiver posições abertas
         if position_size == 0:
