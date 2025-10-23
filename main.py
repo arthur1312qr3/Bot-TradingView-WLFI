@@ -234,8 +234,18 @@ def webhook():
         data = request.get_json() if request.is_json else {}
         action = data.get('action', '').lower()
         market_position = data.get('marketPosition', '').lower()
-        position_size = float(data.get('positionSize', 0))
+        position_size_raw = data.get('positionSize', 0)
         timeframe = data.get('timeframe', 'unknown')
+        
+        # Converte positionSize e valida
+        try:
+            position_size = float(position_size_raw)
+            # Se positionSize for absurdo (>1000), ignora e usa 0
+            if abs(position_size) > 1000:
+                log(f"WARNING: Invalid positionSize {position_size}, using 0")
+                position_size = 0
+        except:
+            position_size = 0
         
         if is_duplicate(f"{action}_{position_size}"):
             return jsonify({'s': 'dup'}), 200
@@ -323,8 +333,10 @@ def webhook():
         
         return jsonify({'s': 'ign'}), 200
     except Exception as e:
-        log(f"ERR: {e}")
-        return jsonify({'s': 'err'}), 500
+        log(f"WEBHOOK ERR: {e}")
+        import traceback
+        log(f"TRACEBACK: {traceback.format_exc()}")
+        return jsonify({'s': 'err', 'msg': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
