@@ -21,7 +21,7 @@ BASE_URL = 'https://api.bitget.com'
 LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
 POSITION_SIZE_PERCENT = 0.99
-MIN_ORDER_VALUE = 5.0
+MIN_ORDER_VALUE = 2.0  # Mínimo $2 USDT (com alavancagem)
 CACHE_TTL = 0.3  # Cache de 300ms (mais agressivo)
 
 # CACHE GLOBAL (OTIMIZAÇÃO #1)
