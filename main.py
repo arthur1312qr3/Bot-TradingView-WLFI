@@ -18,10 +18,10 @@ API_KEY = os.getenv('BITGET_API_KEY')
 API_SECRET = os.getenv('BITGET_API_SECRET')
 API_PASSPHRASE = os.getenv('BITGET_API_PASSPHRASE')
 BASE_URL = 'https://api.bitget.com'
-LEVERAGE = 2
+LEVERAGE = 4
 TARGET_SYMBOL = 'WLFIUSDT'
 POSITION_SIZE_PERCENT = 0.99
-MIN_ORDER_VALUE = 2.0  # Mínimo $2 USDT (com alavancagem)
+MIN_ORDER_VALUE = 5.0
 CACHE_TTL = 0.3  # Cache de 300ms (mais agressivo)
 
 # CACHE GLOBAL (OTIMIZAÇÃO #1)
@@ -180,8 +180,8 @@ def calculate_quantity(balance, price):
         return 0
     
     quantity = exposure / price
-    log(f"${balance:.0f}*99%*2x=${exposure:.0f} QTY:{quantity:.0f}")
-    return round(quantity, 0)
+    log(f"${balance:.2f}*99%*2x=${exposure:.2f} QTY:{quantity:.4f}")
+    return round(quantity, 4)
 
 def close_position(symbol, side, quantity):
     result = bitget_request('POST', '/api/v2/mix/order/place-order', {
