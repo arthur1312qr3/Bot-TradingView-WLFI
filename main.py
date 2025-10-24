@@ -181,7 +181,7 @@ def calculate_quantity(balance, price):
     
     quantity = exposure / price
     log(f"${balance:.2f}*99%*2x=${exposure:.2f} QTY:{quantity:.2f}")
-    return round(quantity, 2)
+    return round(quantity, 0)
 
 def close_position(symbol, side, quantity):
     result = bitget_request('POST', '/api/v2/mix/order/place-order', {
