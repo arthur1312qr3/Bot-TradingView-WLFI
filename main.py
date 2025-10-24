@@ -21,7 +21,7 @@ BASE_URL = 'https://api.bitget.com'
 LEVERAGE = 2
 TARGET_SYMBOL = 'WLFIUSDT'
 POSITION_SIZE_PERCENT = 0.99
-MIN_ORDER_VALUE = 2.0  # Mínimo: $2 USDT (era $5)
+MIN_ORDER_VALUE = 2.0  # Mínimo 2 USDT (era 5)
 CACHE_TTL = 0.3  # Cache de 300ms (mais agressivo)
 
 # CACHE GLOBAL (OTIMIZAÇÃO #1)
@@ -180,8 +180,8 @@ def calculate_quantity(balance, price):
         return 0
     
     quantity = exposure / price
-    log(f"${balance:.2f}*99%*2x=${exposure:.2f} QTY:{quantity:.2f}")
-    return round(quantity, 0)
+    log(f"${balance:.2f}*99%*2x=${exposure:.2f} QTY:{quantity:.4f}")
+    return round(quantity, 4)
 
 def close_position(symbol, side, quantity):
     result = bitget_request('POST', '/api/v2/mix/order/place-order', {
