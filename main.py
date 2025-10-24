@@ -91,11 +91,23 @@ def bitget_request(method, endpoint, params=None):
         else:
             response = session.get(BASE_URL + endpoint, headers=headers, timeout=2)
         
-        response.raise_for_status()
-        data = response.json()
+        # 🔥 NOVO: Capturar resposta antes de raise_for_status
+        try:
+            data = response.json()
+        except:
+            data = {'msg': response.text}
+        
+        if response.status_code != 200:
+            # 🔥 LOG DETALHADO DO ERRO
+            log(f"API ERR {response.status_code}: {data}")
+            if params:
+                log(f"Params sent: {json.dumps(params, indent=2)}")
+            return None
         
         if data.get('code') != '00000':
-            log(f"API ERROR: {data}")
+            log(f"API ERROR code={data.get('code')}: {data.get('msg')}")
+            if params:
+                log(f"Params sent: {json.dumps(params, indent=2)}")
             return None
         return data.get('data')
     except Exception as e:
