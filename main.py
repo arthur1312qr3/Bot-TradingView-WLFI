@@ -4,74 +4,81 @@ import hmac
 import base64
 import hashlib
 import time
+import traceback
 from datetime import datetime
 from flask import Flask, request, jsonify
 import requests
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 app = Flask(__name__)
 
-API_KEY = os.getenv('BITGET_API_KEY')
-API_SECRET = os.getenv('BITGET_API_SECRET')
-API_PASSPHRASE = os.getenv('BITGET_API_PASSPHRASE')
+# === CONFIGURAÇÕES ===
+API_KEY = os.environ.get('BITGET_API_KEY', '')
+API_SECRET = os.environ.get('BITGET_API_SECRET', '')
+API_PASSPHRASE = os.environ.get('BITGET_API_PASSPHRASE', '')
 BASE_URL = 'https://api.bitget.com'
-LEVERAGE = 4
 TARGET_SYMBOL = 'WLFIUSDT'
-POSITION_SIZE_PERCENT = 0.99
-MIN_ORDER_VALUE = 5.0
-CACHE_TTL = 0.3  # Cache de 300ms (mais agressivo)
+PRODUCT_TYPE = 'USDT-FUTURES'
+MARGIN_COIN = 'USDT'
+LEVERAGE = 4  # ⚡ ALAVANCAGEM 4X
+POSITION_SIZE_PERCENT = 0.99  # 99% do saldo
+MIN_ORDER_VALUE = 5  # Mínimo $5 USDT
+CACHE_TTL = 0.3  # Cache de 300ms
 
-# CACHE GLOBAL (OTIMIZAÇÃO #1)
+# Validação de credenciais
+if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
+    print("ERROR: Missing API credentials!")
+    exit(1)
+
+# === THREAD POOL E SESSION ===
+executor = ThreadPoolExecutor(max_workers=4)
+
+# Configuração de retry automático
+retry_strategy = Retry(
+    total=3,
+    status_forcelist=[429, 500, 502, 503, 504],
+    backoff_factor=0.5,
+    allowed_methods=['GET', 'POST']
+)
+session = requests.Session()
+adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+session.mount('https://', adapter)
+session.mount('http://', adapter)
+
+# === CACHE GLOBAL ===
 cache = {
     'balance': 0,
     'price': 0,
     'positions': {'long': 0, 'short': 0},
     'time': 0
 }
-cache_lock = threading.Lock()
 
-executor = ThreadPoolExecutor(max_workers=4)
+# === ANTI-DUPLICATA ===
+last_signal = {'time': 0, 'action': '', 'price': 0}
 
-# OTIMIZAÇÃO DE RESILIÊNCIA: Session com retry automático
-session = requests.Session()
-retry_strategy = Retry(
-    total=3,  # Tenta no máximo 3 vezes
-    status_forcelist=[429, 500, 502, 503, 504],  # Retenta nestes códigos HTTP
-    backoff_factor=0.5,  # Espera 0.5s, 1s, 2s entre tentativas
-    allowed_methods=['GET', 'POST']  # Aplica para GET e POST
-)
-adapter = HTTPAdapter(
-    max_retries=retry_strategy,
-    pool_connections=10,
-    pool_maxsize=10
-)
-session.mount('https://', adapter)
-session.mount('http://', adapter)
-
-position_state = {'long_entries': 0, 'short_entries': 0}
-state_lock = threading.Lock()
-last_action = {'key': None, 'time': 0}
-
-def log(message):
-    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}")
+# === FUNÇÕES AUXILIARES ===
+def log(msg):
+    timestamp = datetime.utcnow().strftime('[%H:%M:%S.%f')[:-3] + ']'
+    print(f"{timestamp} {msg}", flush=True)
 
 def generate_signature(timestamp, method, request_path, body=''):
-    if body and isinstance(body, dict):
-        body = json.dumps(body)
-    message = str(timestamp) + method.upper() + request_path + (body if body else '')
-    mac = hmac.new(bytes(API_SECRET, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod=hashlib.sha256)
+    message = timestamp + method + request_path + body
+    mac = hmac.new(
+        API_SECRET.encode('utf-8'),
+        message.encode('utf-8'),
+        hashlib.sha256
+    )
     return base64.b64encode(mac.digest()).decode()
 
-def bitget_request(method, endpoint, params=None, retry_count=0):
+def bitget_request(method, endpoint, params=None):
     timestamp = str(int(time.time() * 1000))
     body_str = json.dumps(params) if params and method == 'POST' else ''
     
     headers = {
         'ACCESS-KEY': API_KEY,
-        'ACCESS-SIGN': generate_signature(timestamp, method, endpoint, body_str if body_str else ''),
+        'ACCESS-SIGN': generate_signature(timestamp, method, endpoint, body_str),
         'ACCESS-TIMESTAMP': timestamp,
         'ACCESS-PASSPHRASE': API_PASSPHRASE,
         'Content-Type': 'application/json',
@@ -83,151 +90,153 @@ def bitget_request(method, endpoint, params=None, retry_count=0):
             response = session.post(BASE_URL + endpoint, headers=headers, data=body_str, timeout=2)
         else:
             response = session.get(BASE_URL + endpoint, headers=headers, timeout=2)
+        
         response.raise_for_status()
+        data = response.json()
         
-        # Log de sucesso apenas se teve retry
-        if retry_count > 0:
-            log(f"OK after {retry_count} retries")
-        
-        return response.json()
-    except requests.exceptions.ConnectionError as e:
-        log(f"CONN ERR (retry will handle)")
-        raise  # Deixa o retry do requests.Session lidar
-    except requests.exceptions.Timeout as e:
-        log(f"TIMEOUT (retry will handle)")
-        raise  # Deixa o retry do requests.Session lidar
+        if data.get('code') != '00000':
+            log(f"API ERROR: {data}")
+            return None
+        return data.get('data')
     except Exception as e:
-        log(f"ERR {e}")
+        log(f"ERR {method} {endpoint}: {e}")
         return None
 
+# === FUNÇÕES DE DADOS ===
 def get_account_balance():
-    result = bitget_request('GET', '/api/v2/mix/account/accounts?productType=USDT-FUTURES', None)
-    if result and result.get('code') == '00000':
-        for account in result.get('data', []):
-            if account.get('marginCoin') == 'USDT':
-                return float(account.get('available', '0'))
-    return 0.0
+    endpoint = f'/api/v2/mix/account/account?symbol={TARGET_SYMBOL}&productType={PRODUCT_TYPE}&marginCoin={MARGIN_COIN}'
+    data = bitget_request('GET', endpoint)
+    if data:
+        return float(data.get('available', 0))
+    return 0
 
-def get_current_price(symbol):
-    result = bitget_request('GET', f'/api/v2/mix/market/ticker?symbol={symbol}&productType=USDT-FUTURES')
-    if result and result.get('code') == '00000':
-        data = result.get('data', [])
-        price = float(data[0].get('lastPr', 0)) if isinstance(data, list) else float(data.get('lastPr', 0))
-        return price if price > 0 else None
-    return None
+def get_current_price():
+    endpoint = f'/api/v2/mix/market/ticker?symbol={TARGET_SYMBOL}&productType={PRODUCT_TYPE}'
+    data = bitget_request('GET', endpoint)
+    if data:
+        return float(data[0].get('lastPr', 0))
+    return 0
 
-def get_positions(symbol):
-    # OTIMIZAÇÃO: Tenta endpoint específico primeiro (mais rápido)
-    result = bitget_request('GET', f'/api/v2/mix/position/single-position?symbol={symbol}&productType=USDT-FUTURES&marginCoin=USDT', None)
+def get_positions():
+    endpoint = f'/api/v2/mix/position/single-position?symbol={TARGET_SYMBOL}&productType={PRODUCT_TYPE}&marginCoin={MARGIN_COIN}'
+    data = bitget_request('GET', endpoint)
     
-    # Se endpoint específico não funcionar, usa o endpoint geral
-    if not result or result.get('code') != '00000':
-        result = bitget_request('GET', f'/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT', None)
-    
-    long_pos = short_pos = 0.0
-    if result and result.get('code') == '00000':
-        positions_data = result.get('data', [])
-        # Se for resposta do single-position, data pode não ser lista
-        if not isinstance(positions_data, list):
-            positions_data = [positions_data]
-            
-        for pos in positions_data:
-            if pos.get('symbol') == symbol:
-                total = float(pos.get('total', 0))
-                hold_side = pos.get('holdSide', '')
-                if hold_side == 'long' and total > 0:
-                    long_pos = abs(total)
-                elif hold_side == 'short' and total > 0:
-                    short_pos = abs(total)
-    return {'long': long_pos, 'short': short_pos}
+    positions = {'long': 0, 'short': 0}
+    if data and isinstance(data, list):
+        for pos in data:
+            side = pos.get('holdSide', '').lower()
+            total = float(pos.get('total', 0))
+            if side == 'long':
+                positions['long'] = total
+            elif side == 'short':
+                positions['short'] = total
+    return positions
 
-def get_cached_data(force_refresh=False):
-    """OTIMIZAÇÃO #1: Cache de dados com TTL de 400ms"""
-    with cache_lock:
-        current_time = time.time()
-        
-        # Se cache é recente E não forçou refresh, retorna cache
-        if not force_refresh and (current_time - cache['time']) < CACHE_TTL:
-            log(f"CACHE HIT")
-            return cache['balance'], cache['price'], cache['positions']
-        
-        # Cache expirado ou forçou refresh - busca dados em paralelo
-        log(f"CACHE MISS - fetching...")
-        
-    # Busca em paralelo (fora do lock para não bloquear)
-    price_future = executor.submit(get_current_price, TARGET_SYMBOL)
-    balance_future = executor.submit(get_account_balance)
-    positions_future = executor.submit(get_positions, TARGET_SYMBOL)
+# === CACHE COM BUSCA PARALELA ===
+def get_cached_data():
+    current_time = time.time()
     
-    price = price_future.result()
-    balance = balance_future.result()
-    positions = positions_future.result()
+    if current_time - cache['time'] < CACHE_TTL:
+        log("CACHE HIT")
+        return cache['balance'], cache['price'], cache['positions']
     
-    # Atualiza cache
-    with cache_lock:
-        cache['price'] = price
-        cache['balance'] = balance
-        cache['positions'] = positions
+    log("CACHE MISS - fetching...")
+    
+    try:
+        price_future = executor.submit(get_current_price)
+        balance_future = executor.submit(get_account_balance)
+        positions_future = executor.submit(get_positions)
+        
+        cache['price'] = price_future.result()
+        cache['balance'] = balance_future.result()
+        cache['positions'] = positions_future.result()
         cache['time'] = current_time
-    
-    return balance, price, positions
+        
+        log(f"Data: BAL=${cache['balance']:.2f} PRICE=${cache['price']:.4f} L={cache['positions']['long']} S={cache['positions']['short']}")
+        
+        return cache['balance'], cache['price'], cache['positions']
+    except Exception as e:
+        log(f"ERR getting data: {e}")
+        log(traceback.format_exc())
+        raise
 
+# === CÁLCULO DE QUANTIDADE ===
 def calculate_quantity(balance, price):
     capital = balance * POSITION_SIZE_PERCENT
     exposure = capital * LEVERAGE
     
     if exposure < MIN_ORDER_VALUE:
+        log(f"Exposure ${exposure:.2f} < MIN ${MIN_ORDER_VALUE}. Skipping.")
         return 0
     
     quantity = exposure / price
-    log(f"${balance:.2f}*99%*2x=${exposure:.2f} QTY:{quantity:.4f}")
-    return round(quantity, 4)
-
-def close_position(symbol, side, quantity):
-    result = bitget_request('POST', '/api/v2/mix/order/place-order', {
-        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginMode': 'crossed',
-        'marginCoin': 'USDT', 'size': str(quantity), 'side': side,
-        'orderType': 'market', 'reduceOnly': 'YES'
-    })
+    # 🔥 CRÍTICO: Arredondar para 0 casas decimais (número inteiro)
+    quantity = round(quantity, 0)
     
-    if result and result.get('code') == '00000':
-        log(f"CLOSE OK")
-        return True
-    log(f"CLOSE FAIL")
-    return False
+    log(f"${balance:.2f}*{int(POSITION_SIZE_PERCENT*100)}%*{LEVERAGE}x=${exposure:.2f} QTY:{quantity}")
+    return quantity
 
-def open_position(symbol, side, quantity):
-    result = bitget_request('POST', '/api/v2/mix/order/place-order', {
-        'symbol': symbol, 'productType': 'USDT-FUTURES', 'marginMode': 'crossed',
-        'marginCoin': 'USDT', 'size': str(quantity), 'side': side, 'orderType': 'market'
-    })
+# === FUNÇÕES DE TRADING ===
+def open_position(symbol, side, size):
+    if size <= 0:
+        log(f"Invalid size {size}")
+        return False
     
-    if result and result.get('code') == '00000':
+    endpoint = '/api/v2/mix/order/place-order'
+    params = {
+        'symbol': symbol,
+        'productType': PRODUCT_TYPE,
+        'marginMode': 'crossed',
+        'marginCoin': MARGIN_COIN,
+        'side': side,
+        'orderType': 'market',
+        'size': str(int(size)),  # 🔥 Garantir inteiro
+        'tradeSide': 'open'
+    }
+    
+    result = bitget_request('POST', endpoint, params)
+    if result:
         log(f"OPEN {side.upper()} OK")
         return True
-    log(f"OPEN FAIL: {result}")
     return False
 
-def is_duplicate(key):
-    current_time = time.time()
-    if last_action['key'] == key and (current_time - last_action['time']) < 0.15:
+def close_position(symbol, side, size):
+    if size <= 0:
         return True
-    last_action['key'] = key
-    last_action['time'] = current_time
+    
+    endpoint = '/api/v2/mix/order/place-order'
+    params = {
+        'symbol': symbol,
+        'productType': PRODUCT_TYPE,
+        'marginMode': 'crossed',
+        'marginCoin': MARGIN_COIN,
+        'side': side,
+        'orderType': 'market',
+        'size': str(int(size)),  # 🔥 Garantir inteiro
+        'tradeSide': 'close'
+    }
+    
+    result = bitget_request('POST', endpoint, params)
+    if result:
+        log(f"CLOSE {side.upper()} OK")
+        return True
     return False
 
-def update_state(action):
-    with state_lock:
-        if action == 'add_long':
-            position_state['long_entries'] = 1
-            position_state['short_entries'] = 0
-        elif action == 'add_short':
-            position_state['short_entries'] = 1
-            position_state['long_entries'] = 0
-        elif action == 'reset':
-            position_state['long_entries'] = 0
-            position_state['short_entries'] = 0
+# === ANTI-DUPLICATA ===
+def is_duplicate(action, price, timeframe):
+    current_time = time.time()
+    time_diff = current_time - last_signal['time']
+    
+    if time_diff < 0.15:  # 150ms
+        log(f"DUPLICATE (Δt={time_diff:.3f}s)")
+        return True
+    
+    last_signal['time'] = current_time
+    last_signal['action'] = action
+    last_signal['price'] = price
+    return False
 
+# === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -236,128 +245,96 @@ def webhook():
         market_position = data.get('marketPosition', '').lower()
         position_size_raw = data.get('positionSize', 0)
         timeframe = data.get('timeframe', 'unknown')
+        price = float(data.get('price', 0))
         
-        # Converte positionSize e valida
+        # Validar positionSize
         try:
             position_size = float(position_size_raw)
-            # Se positionSize for absurdo (>1000), ignora e usa 0
-            if abs(position_size) > 1000:
+            if position_size > 1000000:  # 🔥 Valor absurdo
                 log(f"WARNING: Invalid positionSize {position_size}, using 0")
                 position_size = 0
         except:
             position_size = 0
         
-        if is_duplicate(f"{action}_{position_size}"):
-            return jsonify({'s': 'dup'}), 200
-        
         log(f">> {action.upper()} [{timeframe}min] MP:{market_position} SIZE:{position_size}")
         
-        # OTIMIZAÇÃO #1: Usa cache em vez de 3 chamadas de API
+        # Anti-duplicata
+        if is_duplicate(action, price, timeframe):
+            return jsonify({'s': 'skip'}), 200
+        
+        # Buscar dados
         try:
             balance, price, positions = get_cached_data()
-            
-            if not price:
-                log("ERR: Price is None")
-                return jsonify({'s': 'err', 'msg': 'no price'}), 500
-            
-            log(f"Data: BAL=${balance:.2f} PRICE=${price:.4f} L={positions['long']} S={positions['short']}")
         except Exception as e:
-            log(f"ERR getting data: {e}")
-            import traceback
-            log(traceback.format_exc())
-            return jsonify({'s': 'err', 'msg': 'data fetch failed'}), 500
+            log(f"ERR fetching data: {e}")
+            return jsonify({'s': 'error'}), 500
         
-        # FLAT - Apenas fecha se realmente tiver posições abertas
-        if position_size == 0:
-            if positions['long'] > 0 or positions['short'] > 0:
-                log("CLOSE ALL POSITIONS")
-                if positions['long'] > 0:
-                    close_position(TARGET_SYMBOL, 'sell', positions['long'])
-                if positions['short'] > 0:
-                    close_position(TARGET_SYMBOL, 'buy', positions['short'])
-                update_state('reset')
-                return jsonify({'s': 'ok'}), 200
-            else:
-                log("FLAT but no positions - checking action")
-                # Continua para processar ação de abertura
+        # Lógica de trading
+        if market_position == 'flat':
+            if position_size == 0:
+                if positions['long'] > 0 or positions['short'] > 0:
+                    log("CLOSE ALL POSITIONS")
+                    if positions['long'] > 0:
+                        close_position(TARGET_SYMBOL, 'sell', positions['long'])
+                    if positions['short'] > 0:
+                        close_position(TARGET_SYMBOL, 'buy', positions['short'])
+                    cache['time'] = 0  # Invalidar cache
+                    return jsonify({'s': 'ok'}), 200
+                else:
+                    log("FLAT but no positions - checking action")
+                    # Continua para processar action
         
-        # BUY
+        # Processar action
         if action == 'buy':
+            # Fechar SHORT se existir
             if positions['short'] > 0:
                 close_position(TARGET_SYMBOL, 'buy', positions['short'])
-                # OTIMIZAÇÃO #3: NÃO busca saldo novo (usa o original)
-                # balance = get_account_balance()  <-- REMOVIDO
             
-            if positions['long'] > 0:
-                return jsonify({'s': 'skip'}), 200
-            
-            # OTIMIZAÇÃO #2: REMOVIDO set_leverage_fast (configure manualmente na Bitget)
-            # set_leverage_fast(TARGET_SYMBOL, 'long')  <-- REMOVIDO
-            
-            quantity = calculate_quantity(balance, price)
-            if quantity <= 0:
-                return jsonify({'s': 'err'}), 500
-            
-            success = open_position(TARGET_SYMBOL, 'buy', quantity)
-            if success:
-                update_state('add_long')
-                # Força refresh do cache após abertura
-                get_cached_data(force_refresh=True)
-            
-            return jsonify({'s': 'ok' if success else 'err'}), 200 if success else 500
+            # Abrir LONG
+            if positions['long'] == 0:
+                log("OPEN LONG")
+                quantity = calculate_quantity(balance, price)
+                if quantity > 0:
+                    if open_position(TARGET_SYMBOL, 'buy', quantity):
+                        cache['time'] = 0
+                        return jsonify({'s': 'ok'}), 200
+            else:
+                log("SKIP: Already LONG")
         
-        # SELL
         elif action == 'sell':
+            # Fechar LONG se existir
             if positions['long'] > 0:
                 close_position(TARGET_SYMBOL, 'sell', positions['long'])
-                # OTIMIZAÇÃO #3: NÃO busca saldo novo (usa o original)
-                # balance = get_account_balance()  <-- REMOVIDO
             
-            if positions['short'] > 0:
-                return jsonify({'s': 'skip'}), 200
-            
-            # OTIMIZAÇÃO #2: REMOVIDO set_leverage_fast
-            # set_leverage_fast(TARGET_SYMBOL, 'short')  <-- REMOVIDO
-            
-            quantity = calculate_quantity(balance, price)
-            if quantity <= 0:
-                return jsonify({'s': 'err'}), 500
-            
-            success = open_position(TARGET_SYMBOL, 'sell', quantity)
-            if success:
-                update_state('add_short')
-                # Força refresh do cache após abertura
-                get_cached_data(force_refresh=True)
-            
-            return jsonify({'s': 'ok' if success else 'err'}), 200 if success else 500
+            # Abrir SHORT
+            if positions['short'] == 0:
+                log("OPEN SHORT")
+                quantity = calculate_quantity(balance, price)
+                if quantity > 0:
+                    if open_position(TARGET_SYMBOL, 'sell', quantity):
+                        cache['time'] = 0
+                        return jsonify({'s': 'ok'}), 200
+            else:
+                log("SKIP: Already SHORT")
         
-        return jsonify({'s': 'ign'}), 200
+        return jsonify({'s': 'ok'}), 200
+        
     except Exception as e:
         log(f"WEBHOOK ERR: {e}")
-        import traceback
-        log(f"TRACEBACK: {traceback.format_exc()}")
-        return jsonify({'s': 'err', 'msg': str(e)}), 500
+        log(traceback.format_exc())
+        return jsonify({'s': 'error'}), 500
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'s': 'ok'}), 200
-
-@app.route('/', methods=['GET'])
+@app.route('/')
 def home():
-    return '<h1>WLFI Ultra</h1>', 200
+    return 'Bot WLFI Running'
 
-def keep_alive():
-    def ping():
-        while True:
-            try:
-                time.sleep(840)
-                session.get(f"http://localhost:{os.getenv('PORT', 5000)}/health", timeout=3)
-            except:
-                pass
-    threading.Thread(target=ping, daemon=True).start()
+@app.route('/health')
+def health():
+    return 'OK', 200
 
 if __name__ == '__main__':
-    if not all([API_KEY, API_SECRET, API_PASSPHRASE]):
-        exit(1)
-    keep_alive()
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, threaded=True)
+    log(f"=== BOT WLFI STARTED ===")
+    log(f"Symbol: {TARGET_SYMBOL}")
+    log(f"Leverage: {LEVERAGE}x")
+    log(f"Position Size: {int(POSITION_SIZE_PERCENT*100)}%")
+    app.run(host='0.0.0.0', port=10000)
