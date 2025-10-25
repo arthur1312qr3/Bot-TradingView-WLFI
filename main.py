@@ -223,8 +223,8 @@ def close_position(symbol, side, size):
         'marginCoin': MARGIN_COIN,
         'side': side,
         'orderType': 'market',
-        'size': str(int(size)),  # 🔥 Garantir inteiro
-        'tradeSide': 'close'
+        'size': str(int(size)),
+        'reduceOnly': 'YES'  # 🔥 Modo One-Way usa reduceOnly
     }
     
     result = bitget_request('POST', endpoint, params)
@@ -254,6 +254,7 @@ def webhook():
         data = request.get_json() if request.is_json else {}
         action = data.get('action', '').lower()
         market_position = data.get('marketPosition', '').lower()
+        prev_market_position = data.get('prevMarketPosition', '').lower()
         position_size_raw = data.get('positionSize', 0)
         timeframe = data.get('timeframe', 'unknown')
         price = float(data.get('price', 0))
@@ -261,13 +262,21 @@ def webhook():
         # Validar positionSize
         try:
             position_size = float(position_size_raw)
-            if position_size > 1000000:  # 🔥 Valor absurdo
+            if position_size > 1000000:
                 log(f"WARNING: Invalid positionSize {position_size}, using 0")
                 position_size = 0
         except:
             position_size = 0
         
-        log(f">> {action.upper()} [{timeframe}min] MP:{market_position} SIZE:{position_size}")
+        # 🔥 USAR marketPosition ao invés de action
+        if market_position == 'long':
+            action = 'buy'
+        elif market_position == 'short':
+            action = 'sell'
+        elif market_position == 'flat':
+            action = 'close'
+        
+        log(f">> {action.upper()} [MP:{market_position}] [{timeframe}min] PREV:{prev_market_position} SIZE:{position_size}")
         
         # Anti-duplicata
         if is_duplicate(action, price, timeframe):
@@ -280,28 +289,28 @@ def webhook():
             log(f"ERR fetching data: {e}")
             return jsonify({'s': 'error'}), 500
         
-        # Lógica de trading
-        if market_position == 'flat':
-            if position_size == 0:
-                if positions['long'] > 0 or positions['short'] > 0:
-                    log("CLOSE ALL POSITIONS")
-                    if positions['long'] > 0:
-                        close_position(TARGET_SYMBOL, 'sell', positions['long'])
-                    if positions['short'] > 0:
-                        close_position(TARGET_SYMBOL, 'buy', positions['short'])
-                    cache['time'] = 0  # Invalidar cache
-                    return jsonify({'s': 'ok'}), 200
-                else:
-                    log("FLAT but no positions - checking action")
-                    # Continua para processar action
+        # 🔥 LÓGICA BASEADA EM marketPosition
         
-        # Processar action
-        if action == 'buy':
+        # CASO 1: FLAT (fechar tudo)
+        if market_position == 'flat':
+            if positions['long'] > 0:
+                log("CLOSE LONG")
+                close_position(TARGET_SYMBOL, 'sell', positions['long'])
+                cache['time'] = 0
+            if positions['short'] > 0:
+                log("CLOSE SHORT")
+                close_position(TARGET_SYMBOL, 'buy', positions['short'])
+                cache['time'] = 0
+            return jsonify({'s': 'ok'}), 200
+        
+        # CASO 2: LONG (abrir ou manter long)
+        elif market_position == 'long':
             # Fechar SHORT se existir
             if positions['short'] > 0:
+                log("CLOSE SHORT -> OPEN LONG")
                 close_position(TARGET_SYMBOL, 'buy', positions['short'])
             
-            # Abrir LONG
+            # Abrir LONG se não tiver
             if positions['long'] == 0:
                 log("OPEN LONG")
                 quantity = calculate_quantity(balance, price)
@@ -311,13 +320,16 @@ def webhook():
                         return jsonify({'s': 'ok'}), 200
             else:
                 log("SKIP: Already LONG")
+                return jsonify({'s': 'ok'}), 200
         
-        elif action == 'sell':
+        # CASO 3: SHORT (abrir ou manter short)
+        elif market_position == 'short':
             # Fechar LONG se existir
             if positions['long'] > 0:
+                log("CLOSE LONG -> OPEN SHORT")
                 close_position(TARGET_SYMBOL, 'sell', positions['long'])
             
-            # Abrir SHORT
+            # Abrir SHORT se não tiver
             if positions['short'] == 0:
                 log("OPEN SHORT")
                 quantity = calculate_quantity(balance, price)
@@ -327,6 +339,7 @@ def webhook():
                         return jsonify({'s': 'ok'}), 200
             else:
                 log("SKIP: Already SHORT")
+                return jsonify({'s': 'ok'}), 200
         
         return jsonify({'s': 'ok'}), 200
         
