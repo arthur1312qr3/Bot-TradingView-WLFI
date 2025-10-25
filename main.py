@@ -202,8 +202,7 @@ def open_position(symbol, side, size):
         'marginCoin': MARGIN_COIN,
         'side': side,
         'orderType': 'market',
-        'size': str(int(size)),  # 🔥 Garantir inteiro
-        'tradeSide': 'open'
+        'size': str(int(size))  # 🔥 SEM tradeSide para modo One-Way
     }
     
     result = bitget_request('POST', endpoint, params)
